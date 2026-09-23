@@ -844,16 +844,13 @@ export default function ExecutiveBiDashboard({
           </button>
 
           <button
-            onClick={() => {
-              onRefresh();
-              loadServerSummary(selectedYear);
-            }}
-            disabled={loading || serverLoading}
+            onClick={() => onRefresh()}
+            disabled={loading}
             className="px-3 py-1.5 bg-white/10 hover:bg-white/20 border border-white/20 rounded-xl text-xs font-bold text-white transition-all flex items-center gap-1.5 shadow-xs cursor-pointer active:scale-95 disabled:opacity-50"
-            title="Refresh All Database Modules (Single-Request Server Aggregation)"
+            title="Refresh All Database Modules"
           >
-            <RefreshCw className={cn("w-3.5 h-3.5", (loading || serverLoading) && "animate-spin text-[#C5A059]")} />
-            <span>{(loading || serverLoading) ? "Refreshing..." : "Refresh"}</span>
+            <RefreshCw className={cn("w-3.5 h-3.5", loading && "animate-spin text-[#C5A059]")} />
+            <span>{loading ? "Refreshing..." : "Refresh"}</span>
           </button>
 
           <button
@@ -1077,19 +1074,18 @@ export default function ExecutiveBiDashboard({
                 <span>🏢</span> Godown Stock
               </span>
               <div className="flex items-center gap-1">
-                {(serverError || (metrics.currentGodownStockMt === 0 && metrics.totalArrivalsCount > 0)) && (
+                {metrics.currentGodownStockMt === 0 && metrics.totalArrivalsCount > 0 && (
                   <button
                     type="button"
                     onClick={(e) => {
                       e.stopPropagation();
-                      loadServerSummary(selectedYear);
                       onRefresh();
                     }}
                     className="p-1 px-2 rounded-lg bg-amber-100 hover:bg-amber-200 text-amber-900 border border-amber-300 text-[10px] font-bold flex items-center gap-1 transition-colors cursor-pointer"
-                    title="Retry Stock Query"
+                    title="Refresh Stock Query"
                   >
-                    <RefreshCw className={cn("w-3 h-3", serverLoading && "animate-spin")} />
-                    <span>Retry</span>
+                    <RefreshCw className={cn("w-3 h-3", loading && "animate-spin")} />
+                    <span>Refresh</span>
                   </button>
                 )}
                 <div className="p-1.5 rounded-xl bg-slate-100 text-slate-800 border border-slate-300 group-hover:bg-slate-200 transition-colors">
