@@ -1,12 +1,71 @@
 // ============================================================================
-// 100% LOCAL NATIVE POSTGRESQL 18 CLIENT (SUPABASE DISCONNECTED)
+// 100% LOCAL NATIVE POSTGRESQL 18 CLIENT (bjcl_db) - PERMANENT ADAPTER
 // ============================================================================
 
-class LocalPgQueryBuilder {
+import { getApiUrl } from './utils';
+
+// Channel & Realtime listener manager for local app event synchronization
+export class LocalRealtimeChannel {
+  name: string;
+  private listeners: Array<(...args: any[]) => void> = [];
+
+  constructor(name: string) {
+    this.name = name;
+  }
+
+  on(type: string, filterOrCb: any, callback?: (...args: any[]) => void) {
+    const cb = typeof filterOrCb === 'function' ? filterOrCb : callback;
+    if (cb) {
+      this.listeners.push(cb);
+      if (typeof window !== 'undefined') {
+        const handler = (e: any) => {
+          try {
+            cb(e.detail || { eventType: 'UPDATE', new: {}, old: {} });
+          } catch (err) {}
+        };
+        window.addEventListener('app-data-updated', handler);
+        (this as any)[`__handler_${this.listeners.length}`] = handler;
+      }
+    }
+    return this;
+  }
+
+  subscribe(callback?: (status: string) => void) {
+    if (callback) {
+      setTimeout(() => {
+        try {
+          callback('SUBSCRIBED');
+        } catch (e) {}
+      }, 0);
+    }
+    return this;
+  }
+
+  async unsubscribe(): Promise<string> {
+    if (typeof window !== 'undefined') {
+      Object.keys(this).forEach(k => {
+        if (k.startsWith('__handler_')) {
+          window.removeEventListener('app-data-updated', (this as any)[k]);
+        }
+      });
+    }
+    return Promise.resolve('ok');
+  }
+
+  async send(payload: any): Promise<string> {
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('app-data-updated', { detail: payload }));
+    }
+    return Promise.resolve('ok');
+  }
+}
+
+export class LocalPgQueryBuilder {
   private table: string;
   private action: 'select' | 'insert' | 'upsert' | 'update' | 'delete' = 'select';
   private payload: any = null;
   private filters: Record<string, any> = {};
+  private complexFilters: Array<{ column: string; op: string; value: any }> = [];
   private orderCol?: string;
   private ascending: boolean = true;
   private limitCount?: number;
@@ -53,6 +112,56 @@ class LocalPgQueryBuilder {
     return this;
   }
 
+  neq(column: string, value: any) {
+    this.complexFilters.push({ column, op: '!=', value });
+    return this;
+  }
+
+  gt(column: string, value: any) {
+    this.complexFilters.push({ column, op: '>', value });
+    return this;
+  }
+
+  gte(column: string, value: any) {
+    this.complexFilters.push({ column, op: '>=', value });
+    return this;
+  }
+
+  lt(column: string, value: any) {
+    this.complexFilters.push({ column, op: '<', value });
+    return this;
+  }
+
+  lte(column: string, value: any) {
+    this.complexFilters.push({ column, op: '<=', value });
+    return this;
+  }
+
+  like(column: string, value: any) {
+    this.complexFilters.push({ column, op: 'LIKE', value });
+    return this;
+  }
+
+  ilike(column: string, value: any) {
+    this.complexFilters.push({ column, op: 'ILIKE', value });
+    return this;
+  }
+
+  is(column: string, value: any) {
+    this.filters[column] = value;
+    return this;
+  }
+
+  in(column: string, values: any[]) {
+    this.complexFilters.push({ column, op: 'IN', value: values });
+    return this;
+  }
+
+  filter(column: string, op: string, value: any) {
+    this.complexFilters.push({ column, op, value });
+    return this;
+  }
+
   order(column: string, options?: { ascending?: boolean }) {
     this.orderCol = column;
     this.ascending = options?.ascending !== false;
@@ -80,9 +189,13 @@ class LocalPgQueryBuilder {
     return this;
   }
 
+  abortSignal() {
+    return this;
+  }
+
   async then(resolve: (res: { data: any; error: any; count?: number }) => void, reject?: (err: any) => void) {
     try {
-      const res = await fetch('/api/pg/crud', {
+      const res = await fetch(getApiUrl('/api/pg/crud'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -90,6 +203,7 @@ class LocalPgQueryBuilder {
           table: this.table,
           data: this.payload,
           filters: this.filters,
+          complexFilters: this.complexFilters,
           order: this.orderCol,
           ascending: this.ascending,
           limit: this.limitCount,
@@ -111,20 +225,74 @@ class LocalPgQueryBuilder {
         data = Array.isArray(data) ? (data.length > 0 ? data[0] : null) : data;
       }
 
+      // Notify other views if state modified
+      if (this.action !== 'select' && typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('app-data-updated', { detail: { table: this.table, action: this.action } }));
+      }
+
       resolve({ data, error: null, count: Array.isArray(data) ? data.length : 1 });
     } catch (err: any) {
       resolve({ data: null, error: err });
     }
   }
+
+  catch(reject: (err: any) => void) {
+    return this.then(r => {
+      if (r.error) reject(r.error);
+    }, reject);
+  }
 }
+
+const activeChannels = new Map<string, LocalRealtimeChannel>();
 
 export const supabase: any = {
   from(table: string) {
     return new LocalPgQueryBuilder(table);
   },
+  channel(name: string) {
+    let chan = activeChannels.get(name);
+    if (!chan) {
+      chan = new LocalRealtimeChannel(name);
+      activeChannels.set(name, chan);
+    }
+    return chan;
+  },
+  async removeChannel(chan: any): Promise<string> {
+    if (chan && chan.name) {
+      await chan.unsubscribe();
+      activeChannels.delete(chan.name);
+    }
+    return Promise.resolve('ok');
+  },
+  async removeAllChannels(): Promise<string[]> {
+    for (const c of activeChannels.values()) {
+      await c.unsubscribe();
+    }
+    activeChannels.clear();
+    return Promise.resolve(['ok']);
+  },
+  getChannels() {
+    return Array.from(activeChannels.values());
+  },
+  functions: {
+    invoke: async () => ({ data: null, error: null })
+  },
+  auth: {
+    getSession: async () => ({ data: { session: null }, error: null }),
+    getUser: async () => ({ data: { user: null }, error: null }),
+    onAuthStateChange: () => ({ data: { subscription: { unsubscribe: () => {} } } }),
+    signOut: async () => ({ error: null })
+  },
+  storage: {
+    from: () => ({
+      upload: async () => ({ data: null, error: null }),
+      getPublicUrl: () => ({ data: { publicUrl: '' } }),
+      download: async () => ({ data: null, error: null })
+    })
+  },
   async rpc(name: string, args?: any) {
     try {
-      const res = await fetch('/api/pg/rpc', {
+      const res = await fetch(getApiUrl('/api/pg/rpc'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name, args })
@@ -140,4 +308,4 @@ export const supabase: any = {
 export const getSupabase = () => supabase;
 export const isConfigured = true;
 
-console.log("🔒 [100% LOCAL ARCHITECTURE] Bally Jute ERP is running entirely on Local PostgreSQL 18 (bjcl_db). Supabase is disconnected.");
+console.log("🔒 [100% LOCAL ARCHITECTURE] Bally Jute ERP running on Local PostgreSQL 18 (bjcl_db).");

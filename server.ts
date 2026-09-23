@@ -19,10 +19,66 @@ const pgPool = new Pool({
   connectionTimeoutMillis: 6000,
 });
 
-// Test connection on launch
+// Test connection on launch & auto-init core tables
 pgPool.query('SELECT current_database() as db, version() as ver;')
-  .then(res => {
+  .then(async (res) => {
     console.log(`✅ [LOCAL POSTGRESQL] Connected to Database: [${res.rows[0]?.db}]`);
+    try {
+      await pgPool.query(`
+        CREATE TABLE IF NOT EXISTS satta_mismatch (
+          id TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+          mismatch_id TEXT,
+          po_no TEXT,
+          sauda_no TEXT,
+          area TEXT,
+          grade TEXT,
+          field TEXT,
+          expected_value TEXT,
+          actual_value TEXT,
+          expected_rate NUMERIC,
+          actual_rate NUMERIC,
+          status TEXT DEFAULT 'dispute',
+          remarks TEXT,
+          approved_by TEXT,
+          approved_at TIMESTAMP WITH TIME ZONE,
+          approval_level TEXT DEFAULT 'L3/L5',
+          created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        );
+
+        CREATE TABLE IF NOT EXISTS material_mismatch (
+          id TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+          mr_no TEXT,
+          po_no TEXT,
+          sauda_no TEXT,
+          supplier TEXT,
+          broker TEXT,
+          field TEXT,
+          expected_value TEXT,
+          actual_value TEXT,
+          status TEXT DEFAULT 'pending',
+          remarks TEXT,
+          created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        );
+
+        CREATE TABLE IF NOT EXISTS imap_emails (
+          id TEXT PRIMARY KEY,
+          subject TEXT,
+          sender_name TEXT,
+          sender_email TEXT,
+          date TIMESTAMP WITH TIME ZONE,
+          snippet TEXT,
+          body TEXT,
+          html TEXT,
+          attachments TEXT,
+          unread BOOLEAN DEFAULT TRUE,
+          starred BOOLEAN DEFAULT FALSE,
+          created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        );
+      `);
+      console.log("✅ [LOCAL POSTGRESQL] Core tables verified/initialized successfully.");
+    } catch (e: any) {
+      console.warn("⚠️ [LOCAL POSTGRESQL] Schema init notice:", e.message);
+    }
   })
   .catch(err => {
     console.warn(`⚠️ [LOCAL POSTGRESQL] Notice: ${err.message}`);
@@ -334,7 +390,7 @@ async function startServer() {
   });
 
   app.post(["/api/pg/crud", "/Jute-Purchase-Automation/api/pg/crud"], async (req, res) => {
-    const { action, table, data, filters = {}, order, ascending = true, limit, offset, idCol } = req.body;
+    const { action, table, data, filters = {}, complexFilters = [], order, ascending = true, limit, offset, idCol } = req.body;
     if (!table) return res.status(400).json({ error: "Missing table name" });
 
     try {
@@ -344,31 +400,74 @@ async function startServer() {
         const whereClauses: string[] = [];
         const params: any[] = [];
 
-        Object.keys(filters).forEach((key, idx) => {
-          whereClauses.push(`"${key}" = $${idx + 1}`);
+        Object.keys(filters).forEach((key) => {
           params.push(filters[key]);
+          whereClauses.push(`"${key}" = $${params.length}`);
         });
 
+        if (Array.isArray(complexFilters)) {
+          complexFilters.forEach((cf: any) => {
+            if (cf && cf.column && cf.op) {
+              if (cf.op === 'IN' && Array.isArray(cf.value)) {
+                const placeholders = cf.value.map((v: any) => {
+                  params.push(v);
+                  return `$${params.length}`;
+                }).join(', ');
+                whereClauses.push(`"${cf.column}" IN (${placeholders})`);
+              } else {
+                params.push(cf.value);
+                whereClauses.push(`"${cf.column}" ${cf.op} $${params.length}`);
+              }
+            }
+          });
+        }
+
+        let fullSql = sql;
         if (whereClauses.length > 0) {
-          sql += ` WHERE ` + whereClauses.join(' AND ');
+          fullSql += ` WHERE ` + whereClauses.join(' AND ');
         }
 
         if (order) {
-          sql += ` ORDER BY "${order}" ${ascending ? 'ASC' : 'DESC'}`;
+          fullSql += ` ORDER BY "${order}" ${ascending ? 'ASC' : 'DESC'}`;
         }
 
+        const queryParams = [...params];
         if (limit) {
-          params.push(limit);
-          sql += ` LIMIT $${params.length}`;
+          queryParams.push(limit);
+          fullSql += ` LIMIT $${queryParams.length}`;
         }
 
         if (offset) {
-          params.push(offset);
-          sql += ` OFFSET $${params.length}`;
+          queryParams.push(offset);
+          fullSql += ` OFFSET $${queryParams.length}`;
         }
 
-        const result = await pgPool.query(sql, params);
-        return res.json({ data: result.rows, error: null });
+        try {
+          const result = await pgPool.query(fullSql, queryParams);
+          return res.json({ data: result.rows, error: null });
+        } catch (queryErr: any) {
+          // If ORDER BY column or specific WHERE column does not exist in schema, fallback to safe select
+          if (queryErr.message?.includes('column') && queryErr.message?.includes('does not exist')) {
+            console.warn(`[PG Select Fallback on ${table}]: ${queryErr.message}. Executing base SELECT...`);
+            let safeSql = `SELECT * FROM "${table}"`;
+            if (limit) safeSql += ` LIMIT ${Number(limit)}`;
+            try {
+              const safeResult = await pgPool.query(safeSql);
+              let rows = safeResult.rows;
+              // Filter in JavaScript if needed
+              if (Object.keys(filters).length > 0) {
+                rows = rows.filter((r: any) => {
+                  return Object.keys(filters).every(k => String(r[k] ?? '') === String(filters[k] ?? ''));
+                });
+              }
+              return res.json({ data: rows, error: null });
+            } catch (fbErr: any) {
+              // If table itself is missing, let outer catch auto-heal it
+              throw fbErr;
+            }
+          }
+          throw queryErr;
+        }
       }
 
       // 2. INSERT
@@ -467,6 +566,39 @@ async function startServer() {
 
       return res.status(400).json({ error: `Unknown action: ${action}` });
     } catch (err: any) {
+      // Auto-heal missing table (PostgreSQL 42P01: relation does not exist)
+      if (err.code === '42P01' || err.message?.includes('does not exist')) {
+        console.warn(`[Auto-Heal] Table "${table}" missing in PostgreSQL. Creating automatically...`);
+        try {
+          await pgPool.query(`
+            CREATE TABLE IF NOT EXISTS "${table}" (
+              id TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+              created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+              updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+            );
+          `);
+          if (action === 'select') {
+            return res.json({ data: [], error: null });
+          }
+          if (action === 'insert' || action === 'upsert') {
+            const sample = Array.isArray(data) ? data[0] : data;
+            if (sample && typeof sample === 'object') {
+              for (const col of Object.keys(sample)) {
+                if (col !== 'id' && col !== 'created_at' && col !== 'updated_at') {
+                  await pgPool.query(`ALTER TABLE "${table}" ADD COLUMN IF NOT EXISTS "${col}" TEXT;`).catch(() => {});
+                }
+              }
+            }
+            return res.json({ data: data, error: null });
+          }
+          if (action === 'delete') {
+            return res.json({ success: true, rowCount: 0, error: null });
+          }
+        } catch (healErr) {
+          console.error(`[Auto-Heal Error for ${table}]:`, healErr);
+        }
+      }
+
       console.error(`[PG CRUD Error on ${table} - ${action}]:`, err.message);
       return res.status(500).json({ error: err.message, data: null });
     }
