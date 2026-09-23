@@ -1,0 +1,27 @@
+# ============================================================================
+# CADDY REVERSE PROXY CONFIGURATION FOR WINDOWS SERVER 2022
+# Location: C:\BJCL\Caddyfile
+# ============================================================================
+
+# 1. Local Network Access (Port 80 HTTP)
+:80, 192.168.1.5:80 {
+    # Route API requests to Node.js Backend (Port 5000)
+    handle /api/* {
+        reverse_proxy 127.0.0.1:5000
+    }
+
+    # Route all other requests to Frontend (Port 3000) or static files
+    handle {
+        reverse_proxy 127.0.0.1:3000
+    }
+}
+
+# 2. Public Domain Access with Automatic HTTPS (Replace with your domain)
+# erp.ballyjute.com {
+#     handle /api/* {
+#         reverse_proxy 127.0.0.1:5000
+#     }
+#     handle {
+#         reverse_proxy 127.0.0.1:3000
+#     }
+# }
