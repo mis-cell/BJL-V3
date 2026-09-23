@@ -1772,6 +1772,11 @@ export default function PaymentModule({ onClose }: { onClose?: () => void }) {
       setVerifiedArrivals(verified);
 
       // Fallback or fill empty masters from dbModule
+      gData = Array.isArray(gData) ? gData : [];
+      agData = Array.isArray(agData) ? agData : [];
+      mDataList = Array.isArray(mDataList) ? mDataList : [];
+      aData = Array.isArray(aData) ? aData : [];
+
       if (gData.length === 0) gData = await dbModule.fetchAll('grade_master').catch(() => []);
       if (agData.length === 0) agData = await dbModule.fetchAll('agency_master').catch(() => []);
       if (mDataList.length === 0) mDataList = await dbModule.fetchAll('marka_master').catch(() => []);

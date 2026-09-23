@@ -283,12 +283,11 @@ export default function LorryDispatchSystem({
   async function loadLorryWeighments() {
     if (!supabase) return;
     try {
-      const { data, error } = await supabase
-        .from("lorry_weighments")
-        .select("*")
-        .then(res => res, () => ({ data: null, error: new Error('Table unavailable') }));
+      const res = await supabase.from("lorry_weighments").select("*");
+      const data = res?.data || [];
+      const error = res?.error || null;
 
-      if (!error && data) {
+      if (!error && Array.isArray(data) && data.length > 0) {
         const loaded: LorryRecord[] = data.map((row: any) => {
           const millGross = Number(row.mill_gross_weight ?? row.stage1_gross_weight ?? 0);
           const millTare = Number(row.mill_tare_weight ?? row.stage1_tare_weight ?? 0);

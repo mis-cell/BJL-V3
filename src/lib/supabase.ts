@@ -4,10 +4,25 @@
 
 import { getApiUrl } from './utils';
 
+// Central debounced event dispatcher to prevent socket resource exhaustion
+const updateDebounceTimers = new Map<string, any>();
+
+function dispatchTableUpdated(table: string) {
+  if (typeof window === 'undefined') return;
+  if (updateDebounceTimers.has(table)) {
+    clearTimeout(updateDebounceTimers.get(table));
+  }
+  const timer = setTimeout(() => {
+    updateDebounceTimers.delete(table);
+    window.dispatchEvent(new CustomEvent('app-data-updated', { detail: { table } }));
+  }, 350);
+  updateDebounceTimers.set(table, timer);
+}
+
 // Channel & Realtime listener manager for local app event synchronization
 export class LocalRealtimeChannel {
   name: string;
-  private listeners: Array<(...args: any[]) => void> = [];
+  private listeners: Array<{ table?: string; cb: (...args: any[]) => void; handler: (e: any) => void }> = [];
 
   constructor(name: string) {
     this.name = name;
@@ -15,17 +30,19 @@ export class LocalRealtimeChannel {
 
   on(type: string, filterOrCb: any, callback?: (...args: any[]) => void) {
     const cb = typeof filterOrCb === 'function' ? filterOrCb : callback;
-    if (cb) {
-      this.listeners.push(cb);
-      if (typeof window !== 'undefined') {
-        const handler = (e: any) => {
+    const filterTable = (typeof filterOrCb === 'object' && filterOrCb?.table) ? filterOrCb.table : undefined;
+
+    if (cb && typeof window !== 'undefined') {
+      const handler = (e: any) => {
+        const changedTable = e.detail?.table;
+        if (!filterTable || !changedTable || filterTable === changedTable) {
           try {
             cb(e.detail || { eventType: 'UPDATE', new: {}, old: {} });
           } catch (err) {}
-        };
-        window.addEventListener('app-data-updated', handler);
-        (this as any)[`__handler_${this.listeners.length}`] = handler;
-      }
+        }
+      };
+      window.addEventListener('app-data-updated', handler);
+      this.listeners.push({ table: filterTable, cb, handler });
     }
     return this;
   }
@@ -43,18 +60,17 @@ export class LocalRealtimeChannel {
 
   async unsubscribe(): Promise<string> {
     if (typeof window !== 'undefined') {
-      Object.keys(this).forEach(k => {
-        if (k.startsWith('__handler_')) {
-          window.removeEventListener('app-data-updated', (this as any)[k]);
-        }
+      this.listeners.forEach(item => {
+        window.removeEventListener('app-data-updated', item.handler);
       });
+      this.listeners = [];
     }
     return Promise.resolve('ok');
   }
 
   async send(payload: any): Promise<string> {
-    if (typeof window !== 'undefined') {
-      window.dispatchEvent(new CustomEvent('app-data-updated', { detail: payload }));
+    if (typeof window !== 'undefined' && payload?.table) {
+      dispatchTableUpdated(payload.table);
     }
     return Promise.resolve('ok');
   }
@@ -212,33 +228,35 @@ export class LocalPgQueryBuilder {
         })
       });
 
-      const json = await res.json();
+      const json = await res.json().catch(() => ({ data: [], error: null }));
       if (!res.ok || json.error) {
-        resolve({ data: null, error: json.error || new Error('Local PostgreSQL Query Error') });
+        resolve({ data: this.wantsSingle ? null : [], error: json.error || new Error('Local PostgreSQL Query Error'), count: 0 });
         return;
       }
 
-      let data = json.data;
+      let data = json.data ?? [];
       if (this.wantsSingle) {
         data = Array.isArray(data) ? (data.length > 0 ? data[0] : null) : data;
       } else if (this.wantsMaybeSingle) {
         data = Array.isArray(data) ? (data.length > 0 ? data[0] : null) : data;
+      } else {
+        data = Array.isArray(data) ? data : (data ? [data] : []);
       }
 
-      // Notify other views if state modified
-      if (this.action !== 'select' && typeof window !== 'undefined') {
-        window.dispatchEvent(new CustomEvent('app-data-updated', { detail: { table: this.table, action: this.action } }));
+      // Notify other views if state modified with debouncing
+      if (this.action !== 'select') {
+        dispatchTableUpdated(this.table);
       }
 
       resolve({ data, error: null, count: Array.isArray(data) ? data.length : 1 });
     } catch (err: any) {
-      resolve({ data: null, error: err });
+      resolve({ data: this.wantsSingle ? null : [], error: err, count: 0 });
     }
   }
 
   catch(reject: (err: any) => void) {
     return this.then(r => {
-      if (r.error) reject(r.error);
+      if (r.error && reject) reject(r.error);
     }, reject);
   }
 }
@@ -297,10 +315,10 @@ export const supabase: any = {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name, args })
       });
-      const json = await res.json();
-      return { data: json.data, error: json.error || null };
+      const json = await res.json().catch(() => ({ data: [], error: null }));
+      return { data: json.data ?? [], error: json.error || null };
     } catch (err: any) {
-      return { data: null, error: err };
+      return { data: [], error: err };
     }
   }
 };

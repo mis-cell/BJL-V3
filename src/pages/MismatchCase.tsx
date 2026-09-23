@@ -329,19 +329,24 @@ export default function MismatchCase({ onClose, variant = 'satta' }: { onClose?:
         supabase ? supabase.from('sms_sauda').select('*').then(res => res.data || []) : Promise.resolve([]),
       ]);
 
-      const inspMasterRows = [...(matInspRows || []), ...(millInspRows || [])];
+      const inspMasterRows = [...(Array.isArray(matInspRows) ? matInspRows : []), ...(Array.isArray(millInspRows) ? millInspRows : [])];
 
       let localSmsSaudas: any[] = [];
       try {
         localSmsSaudas = JSON.parse(localStorage.getItem('po_auto_sms_saudas') || '[]');
       } catch (e) {}
 
-      const combinedSmsSaudas = [...smsSaudaDbRows, ...localSmsSaudas];
+      const combinedSmsSaudas = [...(Array.isArray(smsSaudaDbRows) ? smsSaudaDbRows : []), ...localSmsSaudas];
 
       const items: MaterialMismatchItem[] = [];
 
       // Combine PO sources: sauda_check_point + purchase_master + sauda_master + satta_master
-      const allPoRecords = [...scpRows, ...purchaseMasterRows, ...saudaMasterRows, ...sattaMasterRows];
+      const allPoRecords = [
+        ...(Array.isArray(scpRows) ? scpRows : []),
+        ...(Array.isArray(purchaseMasterRows) ? purchaseMasterRows : []),
+        ...(Array.isArray(saudaMasterRows) ? saudaMasterRows : []),
+        ...(Array.isArray(sattaMasterRows) ? sattaMasterRows : [])
+      ];
       const poMap = new Map<string, any>();
       allPoRecords.forEach(p => {
         const pNo = String(p.po_no || p.contract_po_no || p.sauda_no || p.satta_no || '').trim().toUpperCase();
