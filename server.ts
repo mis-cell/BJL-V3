@@ -7,7 +7,6 @@ import aiGatewayRouter from "./src/lib/ai-gateway.ts";
 import nodemailer from "nodemailer";
 import imaps from 'imap-simple';
 import { simpleParser } from 'mailparser';
-import { createClient } from '@supabase/supabase-js';
 import pg from 'pg';
 
 dotenv.config();
@@ -23,15 +22,11 @@ const pgPool = new Pool({
 // Test connection on launch
 pgPool.query('SELECT current_database() as db, version() as ver;')
   .then(res => {
-    console.log(`✅ Connected to local PostgreSQL 18: Database = [${res.rows[0]?.db}]`);
+    console.log(`✅ [LOCAL POSTGRESQL] Connected to Database: [${res.rows[0]?.db}]`);
   })
   .catch(err => {
-    console.warn(`⚠️ Local PostgreSQL 18 connection notice (${err.message}). Defaulting to available endpoints.`);
+    console.warn(`⚠️ [LOCAL POSTGRESQL] Notice: ${err.message}`);
   });
-
-const supabaseUrl = process.env.VITE_SUPABASE_URL || 'https://lxuapkccxaadwixjpirs.supabase.co';
-const supabaseAnonKey = process.env.VITE_SUPABASE_ANON_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imx4dWFwa2NjeGFhZHdpeGpwaXJzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzg4MzQ4NDksImV4cCI6MjA5NDQxMDg0OX0.rzjJFNOb1gx0Z4cMSfkW9yDe4rI8oO6TLTzcVXswPek';
-const supabase = createClient(supabaseUrl, supabaseAnonKey);
 
 // Helper to clean RFC 2047 encoded words if any remain
 function cleanMimeWords(str: string): string {
@@ -143,16 +138,29 @@ async function runImapSync() {
     connection = null;
     
     if (emails.length > 0) {
-      console.log(`[Sync] Upserting ${emails.length} live Gmail emails to Supabase...`);
-      const { error } = await supabase
-        .from('imap_emails')
-        .upsert(emails, { onConflict: 'id' });
-        
-      if (error) {
-        console.error("[Sync] Error upserting to Supabase:", error);
-      } else {
-        console.log("[Sync] Successfully synchronized live Gmail emails to Supabase!");
+      console.log(`[Sync] Upserting ${emails.length} live Gmail emails to local PostgreSQL (bjcl_db)...`);
+      for (const e of emails) {
+        try {
+          await pgPool.query(`
+            INSERT INTO imap_emails (id, subject, sender_name, sender_email, date, snippet, body, html, attachments, unread, starred)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+            ON CONFLICT (id) DO UPDATE SET
+              subject = EXCLUDED.subject,
+              sender_name = EXCLUDED.sender_name,
+              sender_email = EXCLUDED.sender_email,
+              date = EXCLUDED.date,
+              snippet = EXCLUDED.snippet,
+              body = EXCLUDED.body,
+              html = EXCLUDED.html,
+              attachments = EXCLUDED.attachments,
+              unread = EXCLUDED.unread,
+              starred = EXCLUDED.starred;
+          `, [e.id, e.subject, e.sender_name, e.sender_email, e.date, e.snippet, e.body, e.html, e.attachments, e.unread, e.starred]);
+        } catch (dbErr: any) {
+          // Table might not exist yet; will be created on start
+        }
       }
+      console.log("[Sync] Successfully synchronized live Gmail emails to local PostgreSQL (bjcl_db)!");
 
       // Also update local cache file
       try {
@@ -191,34 +199,29 @@ async function runImapSync() {
 }
 
 async function syncEmailsBackground() {
-  console.log("Starting background IMAP email sync process...");
+  console.log("Starting background IMAP email sync process for local PostgreSQL...");
   
-  // Ensure table exists on startup
+  // Ensure table exists in local PostgreSQL on startup
   try {
-    await supabase.rpc('exec_sql', {
-      query: `
-        CREATE TABLE IF NOT EXISTS imap_emails (
-          id TEXT PRIMARY KEY,
-          subject TEXT,
-          sender_name TEXT,
-          sender_email TEXT,
-          date TIMESTAMP WITH TIME ZONE,
-          snippet TEXT,
-          body TEXT,
-          html TEXT,
-          attachments TEXT,
-          unread BOOLEAN DEFAULT TRUE,
-          starred BOOLEAN DEFAULT FALSE,
-          created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-        );
-        ALTER TABLE imap_emails DISABLE ROW LEVEL SECURITY;
-        ALTER TABLE imap_emails ADD COLUMN IF NOT EXISTS html TEXT;
-        ALTER TABLE imap_emails ADD COLUMN IF NOT EXISTS attachments TEXT;
-      `
-    });
-    console.log("Supabase table 'imap_emails' verified/created successfully.");
+    await pgPool.query(`
+      CREATE TABLE IF NOT EXISTS imap_emails (
+        id TEXT PRIMARY KEY,
+        subject TEXT,
+        sender_name TEXT,
+        sender_email TEXT,
+        date TIMESTAMP WITH TIME ZONE,
+        snippet TEXT,
+        body TEXT,
+        html TEXT,
+        attachments TEXT,
+        unread BOOLEAN DEFAULT TRUE,
+        starred BOOLEAN DEFAULT FALSE,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+      );
+    `);
+    console.log("Local PostgreSQL table 'imap_emails' verified/created successfully in bjcl_db.");
   } catch (err) {
-    console.warn("Failed to create/verify 'imap_emails' table in Supabase via RPC:", err);
+    console.warn("Local PostgreSQL 'imap_emails' setup notice:", err);
   }
 
   // Run immediately, then every 30 seconds

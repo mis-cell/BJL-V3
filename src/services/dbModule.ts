@@ -31,20 +31,49 @@ export type EntityType =
   | 'payment_master'
   | 'payment_details';
 
+// Fast in-memory cache with instant invalidation
+const queryCache = new Map<string, { data: any[]; timestamp: number }>();
+const CACHE_TTL = 30000; // 30 seconds for master tables
+
+function invalidateCache(table?: string) {
+  if (!table) {
+    queryCache.clear();
+    return;
+  }
+  for (const key of queryCache.keys()) {
+    if (key.startsWith(table)) {
+      queryCache.delete(key);
+    }
+  }
+}
+
 export const dbModule = {
   async fetchAll(table: string, orderCol?: string, ascending: boolean = true): Promise<any[]> {
-    if (!supabase) throw new Error("Offline Mode: Connection not established.");
+    if (!supabase) throw new Error("Database connection not established.");
+    
+    // Check in-memory cache for master tables to make UI instant
+    const cacheKey = `${table}:${orderCol || 'default'}:${ascending}`;
+    const cached = queryCache.get(cacheKey);
+    if (cached && (Date.now() - cached.timestamp < CACHE_TTL)) {
+      return cached.data;
+    }
+
     let query = supabase.from(table).select("*");
     if (orderCol) query = query.order(orderCol, { ascending });
     
     const { data, error } = await query;
     if (error) throw error;
-    return data;
+    
+    const result = data || [];
+    queryCache.set(cacheKey, { data: result, timestamp: Date.now() });
+    return result;
   },
 
   async insert(table: string, data: any) {
-    if (!supabase) throw new Error("Offline Mode: Connection not established.");
-    if (!navigator.onLine) {
+    if (!supabase) throw new Error("Database connection not established.");
+    invalidateCache(table);
+
+    if (typeof navigator !== 'undefined' && !navigator.onLine) {
       queueOfflineAction({ action: 'insert', table, data });
       if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('app-data-updated'));
       return data;
@@ -61,8 +90,10 @@ export const dbModule = {
   },
 
   async upsert(table: string, data: any, idCol?: string) {
-    if (!supabase) throw new Error("Offline Mode: Connection not established.");
-    if (!navigator.onLine) {
+    if (!supabase) throw new Error("Database connection not established.");
+    invalidateCache(table);
+
+    if (typeof navigator !== 'undefined' && !navigator.onLine) {
       queueOfflineAction({ action: 'insert', table, data });
       if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('app-data-updated'));
       return data;
@@ -79,8 +110,10 @@ export const dbModule = {
   },
 
   async update(table: string, idCol: string, idVal: any, data: any) {
-    if (!supabase) throw new Error("Offline Mode: Connection not established.");
-    if (!navigator.onLine) {
+    if (!supabase) throw new Error("Database connection not established.");
+    invalidateCache(table);
+
+    if (typeof navigator !== 'undefined' && !navigator.onLine) {
       queueOfflineAction({ action: 'update', table, idCol, idVal, data });
       if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('app-data-updated'));
       return data;
@@ -98,8 +131,10 @@ export const dbModule = {
   },
 
   async delete(table: string, idCol: string, idVal: any) {
-    if (!supabase) throw new Error("Offline Mode: Connection not established.");
-    if (!navigator.onLine) {
+    if (!supabase) throw new Error("Database connection not established.");
+    invalidateCache(table);
+
+    if (typeof navigator !== 'undefined' && !navigator.onLine) {
       queueOfflineAction({ action: 'delete', table, idCol, idVal });
       if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('app-data-updated'));
       return true;
@@ -112,6 +147,10 @@ export const dbModule = {
     if (error) throw error;
     if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('app-data-updated'));
     return true;
+  },
+
+  clearCache(table?: string) {
+    invalidateCache(table);
   }
 };
 
@@ -126,10 +165,6 @@ interface OfflineAction {
 }
 
 let inMemoryOfflineQueue: OfflineAction[] = [];
-
-function getOfflineQueue(): OfflineAction[] {
-  return inMemoryOfflineQueue;
-}
 
 function queueOfflineAction(action: OfflineAction) {
   inMemoryOfflineQueue.push({ ...action, timestamp: Date.now() });
@@ -165,6 +200,8 @@ export async function flushOfflineQueue() {
 }
 
 // Auto-flush when online
-window.addEventListener('online', () => {
-  flushOfflineQueue();
-});
+if (typeof window !== 'undefined') {
+  window.addEventListener('online', () => {
+    flushOfflineQueue();
+  });
+}
