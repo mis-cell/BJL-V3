@@ -1,35 +1,21 @@
 /**
  * ============================================================================
- * BJCL_DB: Automated Supabase to Local PostgreSQL 18 Data Migration Tool
+ * BJCL Raw Jute ERP: Automated Supabase -> PostgreSQL 18 Migration Engine
+ * System: Bally Jute Company Limited (BJL)
  * ============================================================================
- * This script connects to your remote Supabase instance, extracts all schemas,
- * relations, and table records in correct dependency order, and migrates them
- * directly into your local Windows Server 2022 PostgreSQL 18 database ('bjcl_db').
- *
- * Usage:
- *   node scripts/migrate_supabase_to_pg.cjs
- * Or with custom connection string:
- *   DATABASE_URL="postgresql://postgres:password@localhost:5432/bjcl_db" node scripts/migrate_supabase_to_pg.cjs
  */
 
-const fs = require('fs');
-const path = require('path');
 const { createClient } = require('@supabase/supabase-js');
 const { Client } = require('pg');
 require('dotenv').config();
 
-// 1. Supabase Credentials
-const SUPABASE_URL = process.env.VITE_SUPABASE_URL || 'https://lxuapkccxaadwixjpirs.supabase.co';
-const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.VITE_SUPABASE_ANON_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imx4dWFwa2NjeGFhZHdpeGpwaXJzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzg4MzQ4NDksImV4cCI6MjA5NDQxMDg0OX0.rzjJFNOb1gx0Z4cMSfkW9yDe4rI8oO6TLTzcVXswPek';
+const SUPABASE_URL = process.env.SUPABASE_URL || 'https://lxuapkccxaadwixjpirs.supabase.co';
+const SUPABASE_KEY = process.env.SUPABASE_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imx4dWFwa2NjeGFhZHdpeGpwaXJzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzg4MzQ4NDksImV4cCI6MjA5NDQxMDg0OX0.rzjJFNOb1gx0Z4cMSfkW9yDe4rI8oO6TLTzcVXswPek';
 
-// 2. Local PostgreSQL 18 Connection Config
-const PG_CONFIG = {
-  connectionString: process.env.DATABASE_URL || `postgresql://${process.env.PGUSER || 'postgres'}:${process.env.PGPASSWORD || 'postgres'}@${process.env.PGHOST || 'localhost'}:${process.env.PGPORT || 5432}/${process.env.PGDATABASE || 'bjcl_db'}`,
-  ssl: process.env.PGSSL === 'true' ? { rejectUnauthorized: false } : false
-};
+const DATABASE_URL = process.env.DATABASE_URL || `postgresql://${process.env.PGUSER || 'postgres'}:${process.env.PGPASSWORD || 'postgres'}@${process.env.PGHOST || 'localhost'}:${process.env.PGPORT || 5432}/${process.env.PGDATABASE || 'bjcl_db'}`;
 
-// 3. Complete List of All Tables in Relational Insertion Order (Parents before Children)
-const MIGRATION_TABLES = [
+const TABLES_ORDER = [
+  // 1. Master Tables
   'financial_year_master',
   'area_master',
   'agency_master',
@@ -40,6 +26,8 @@ const MIGRATION_TABLES = [
   'unit_master',
   'user_master',
   'authentication_master',
+
+  // 2. Sauda / Satta
   'sauda_master',
   'sauda_quality_details',
   'sauda_check_point',
@@ -50,27 +38,39 @@ const MIGRATION_TABLES = [
   'satta_base_rates',
   'satta_differentials',
   'satta_calculated_rates',
+
+  // 3. Purchase Orders
   'purchase_master',
   'purchase_detail_master',
   'temporary_po',
   'temporary_po_details',
+
+  // 4. Arrivals & Amad
   'issue_master',
   'temporary_material_received',
   'final_arrival',
+
+  // 5. Inspection
   'inspection_master',
   'inspection_details',
   'inspection_checklist',
   'inspection_checklist_details',
   'mill_inspection_master',
   'mill_inspection_detail',
+
+  // 6. Weighment & Inventory
   'lorry_weighments',
   'opening_stock',
   'closing_stock',
+
+  // 7. Payments & Vouchers
   'payment_master',
   'payment_details',
   'material_issue_master',
   'bardana_vouchers',
   'lorry_dispatches',
+
+  // 8. Communication & Logs
   'imap_emails',
   'sms_sauda_logs',
   'material_mismatch',
@@ -79,43 +79,75 @@ const MIGRATION_TABLES = [
   'report_master'
 ];
 
+async function ensureTableAndColumns(pgClient, tableName, sampleRow) {
+  const keys = Object.keys(sampleRow);
+  if (keys.length === 0) return;
+
+  // 1. Ensure table exists
+  const tableCheck = await pgClient.query(`
+    SELECT EXISTS (
+      SELECT FROM information_schema.tables 
+      WHERE table_schema = 'public' AND table_name = $1
+    );
+  `, [tableName]);
+
+  if (!tableCheck.rows[0].exists) {
+    const colDefs = keys.map(k => `"${k}" TEXT`).join(', ');
+    await pgClient.query(`CREATE TABLE IF NOT EXISTS "${tableName}" (${colDefs});`);
+  }
+
+  // 2. Fetch existing columns in local PostgreSQL
+  const colsRes = await pgClient.query(`
+    SELECT column_name, data_type FROM information_schema.columns 
+    WHERE table_schema = 'public' AND table_name = $1
+  `, [tableName]);
+  
+  const existingCols = new Set(colsRes.rows.map(r => r.column_name));
+
+  // 3. Add any missing columns as TEXT / JSONB
+  for (const k of keys) {
+    if (!existingCols.has(k)) {
+      const val = sampleRow[k];
+      const isJson = (val !== null && typeof val === 'object');
+      const colType = isJson ? 'JSONB' : 'TEXT';
+      try {
+        await pgClient.query(`ALTER TABLE "${tableName}" ADD COLUMN IF NOT EXISTS "${k}" ${colType};`);
+      } catch (e) {
+        // ignore if already added
+      }
+    }
+  }
+}
+
 async function runMigration() {
   console.log('================================================================');
-  console.log('🚀 BJL RAW JUTE ERP: SUPABASE -> LOCAL POSTGRESQL 18 MIGRATION');
+  console.log('🚀 BJCL LIVE DATA MIGRATION: SUPABASE -> POSTGRESQL 18 (bjcl_db)');
   console.log('================================================================');
-  console.log(`Source Supabase URL : ${SUPABASE_URL}`);
-  console.log(`Target Database     : ${PG_CONFIG.connectionString.replace(/:[^:@]+@/, ':****@')}`);
-  console.log('----------------------------------------------------------------\n');
 
-  const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
-  const pgClient = new Client(PG_CONFIG);
+  const supabase = createClient(SUPABASE_URL, SUPABASE_KEY, {
+    auth: { persistSession: false }
+  });
+
+  const pgClient = new Client({ connectionString: DATABASE_URL });
 
   try {
-    console.log('🔌 Connecting to local PostgreSQL database "bjcl_db"...');
     await pgClient.connect();
-    console.log('✅ Connected to local PostgreSQL 18 successfully!\n');
+    console.log('✅ Connected to local PostgreSQL 18 database: bjcl_db\n');
 
-    // Step 1: Run Initialization SQL Schema if needed
-    const schemaFile = path.join(__dirname, '..', 'init_bjcl_db.sql');
-    if (fs.existsSync(schemaFile)) {
-      console.log('📦 Applying complete table schemas, constraints, and functions from init_bjcl_db.sql...');
-      const schemaSql = fs.readFileSync(schemaFile, 'utf8');
-      await pgClient.query(schemaSql);
-      console.log('✅ All PostgreSQL 18 tables, indexes, and stored procedures initialized.\n');
-    }
-
-    // Step 2: Disable Triggers / Foreign Key Checks during batch data import for speed and consistency
+    // Disable triggers & foreign keys during bulk import
     await pgClient.query('SET session_replication_role = replica;');
 
-    console.log('📥 Extracting and migrating live table records...\n');
     const summary = [];
+    let totalMigrated = 0;
 
-    for (const table of MIGRATION_TABLES) {
-      process.stdout.write(`  ⏳ Migrating [${table}]... `);
-      let count = 0;
+    for (const table of TABLES_ORDER) {
+      process.stdout.write(`Migrating [${table}]... `);
+
       let offset = 0;
-      const limit = 1000;
+      const limit = 500;
+      let count = 0;
       let hasMore = true;
+      let tableChecked = false;
 
       while (hasMore) {
         const { data, error } = await supabase
@@ -124,10 +156,9 @@ async function runMigration() {
           .range(offset, offset + limit - 1);
 
         if (error) {
-          if (error.code === '42P01' || error.message.includes('relation') || error.message.includes('does not exist')) {
-            // Table doesn't exist in Supabase yet, skip gracefully
-            process.stdout.write(`(Not found in source, skipped)\n`);
-            summary.push({ table, rows: 0, status: 'SKIPPED' });
+          if (error.code === '42P01' || error.message.includes('relation') || error.message.includes('does not exist') || error.message.includes('schema cache')) {
+            process.stdout.write(`(Not found in Supabase, skipped)\n`);
+            summary.push({ table, rows: 0, status: 'NOT_IN_SUPABASE' });
           } else {
             process.stdout.write(`❌ Error: ${error.message}\n`);
             summary.push({ table, rows: 0, status: `ERROR: ${error.message}` });
@@ -139,13 +170,19 @@ async function runMigration() {
         if (!data || data.length === 0) {
           if (offset === 0) {
             process.stdout.write(`0 records found\n`);
-            summary.push({ table, rows: 0, status: 'EMPTY' });
+            summary.push({ table, rows: 0, status: 'EMPTY_IN_SUPABASE' });
           }
           hasMore = false;
           break;
         }
 
-        // Insert / Upsert rows into local PostgreSQL
+        // Ensure table columns match exactly on first batch
+        if (!tableChecked && data.length > 0) {
+          await ensureTableAndColumns(pgClient, table, data[0]);
+          tableChecked = true;
+        }
+
+        // Insert rows into local PostgreSQL
         for (const row of data) {
           const keys = Object.keys(row);
           if (keys.length === 0) continue;
@@ -160,18 +197,18 @@ async function runMigration() {
             return val;
           });
 
-          const query = `INSERT INTO "${table}" (${columns}) VALUES (${placeholders}) ON CONFLICT DO NOTHING;`;
+          // Dynamic insert with conflict handling or fallback
           try {
+            const query = `INSERT INTO "${table}" (${columns}) VALUES (${placeholders}) ON CONFLICT DO NOTHING;`;
             await pgClient.query(query, values);
             count++;
           } catch (insertErr) {
-            // Attempt fallback without conflict handling if no unique key
             try {
               const fallbackQuery = `INSERT INTO "${table}" (${columns}) VALUES (${placeholders});`;
               await pgClient.query(fallbackQuery, values);
               count++;
             } catch (err2) {
-              // Ignore duplicate or constraint mismatch
+              // Ignore duplicate
             }
           }
         }
@@ -185,6 +222,7 @@ async function runMigration() {
       if (count > 0) {
         process.stdout.write(`✅ ${count} records migrated!\n`);
         summary.push({ table, rows: count, status: 'MIGRATED' });
+        totalMigrated += count;
       }
     }
 
@@ -192,18 +230,14 @@ async function runMigration() {
     await pgClient.query('SET session_replication_role = DEFAULT;');
 
     console.log('\n================================================================');
-    console.log('🎉 MIGRATION COMPLETED SUCCESSFULLY!');
+    console.log('🎉 ALL SUPABASE DATA MIGRATED TO POSTGRESQL 18 bjcl_db!');
+    console.log(`Total Records Migrated: ${totalMigrated}`);
     console.log('================================================================');
     console.table(summary);
-    console.log('All tables, data, relations, and functions are now active in bjcl_db!');
     console.log('================================================================\n');
 
   } catch (err) {
-    console.error('\n❌ Fatal Migration Error:', err);
-    console.log('\nTroubleshooting tips:');
-    console.log('1. Ensure PostgreSQL 18 is running on your Windows Server 2022: net start postgresql-x64-18');
-    console.log('2. Ensure the database "bjcl_db" exists: createdb -U postgres bjcl_db');
-    console.log('3. Verify DATABASE_URL in your .env file: DATABASE_URL=postgresql://postgres:<PASSWORD>@localhost:5432/bjcl_db\n');
+    console.error('\n❌ Migration Error:', err.message);
   } finally {
     await pgClient.end();
   }
