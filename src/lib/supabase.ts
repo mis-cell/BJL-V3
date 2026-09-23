@@ -382,6 +382,16 @@ export const supabase: any = {
   },
   async rpc(name: string, args?: any) {
     try {
+      if (name === 'get_dashboard_summary') {
+        const res = await fetch(getApiUrl('/api/dashboard/summary'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(args || {})
+        });
+        const json = await res.json().catch(() => ({ success: false, summary: null, monthly: [] }));
+        return { data: json, error: json.error || null };
+      }
+
       const res = await fetch(getApiUrl('/api/pg/rpc'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -391,6 +401,22 @@ export const supabase: any = {
       return { data: json.data ?? [], error: json.error || null };
     } catch (err: any) {
       return { data: [], error: err };
+    }
+  },
+  async getDashboardSummary(year?: number) {
+    try {
+      const res = await fetch(getApiUrl('/api/dashboard/summary'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ year })
+      });
+      if (!res.ok) {
+        throw new Error(`Server returned ${res.status}`);
+      }
+      return await res.json();
+    } catch (err: any) {
+      console.error("[getDashboardSummary Error]:", err);
+      return { success: false, error: err.message, summary: null, monthly: [] };
     }
   }
 };

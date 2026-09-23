@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { 
   TrendingUp, 
   TrendingDown, 
@@ -33,7 +33,14 @@ import {
   Clock,
   Briefcase,
   Lock,
-  Wallet
+  Wallet,
+  X,
+  ExternalLink,
+  ChevronRight,
+  Info,
+  Check,
+  FileCheck,
+  AlertCircle
 } from 'lucide-react';
 import { 
   ResponsiveContainer, 
@@ -49,13 +56,11 @@ import {
   CartesianGrid, 
   Tooltip, 
   Legend, 
-  ScatterChart, 
-  Scatter, 
   LineChart, 
   Line, 
   ComposedChart 
 } from 'recharts';
-import { cn } from '../lib/utils';
+import { cn, formatIndianCurrency, formatIndianNumber, formatDate } from '../lib/utils';
 import { hasModulePermission } from '../lib/permissions';
 
 function safeStr(val: any, fallback = 'N/A'): string {
@@ -74,6 +79,16 @@ function safeStr(val: any, fallback = 'N/A'): string {
     return fallback;
   }
   return fallback;
+}
+
+interface DrillDownState {
+  isOpen: boolean;
+  type: 'sauda' | 'po' | 'payment' | 'stock' | 'monthly_sauda' | 'monthly_pending' | 'monthly_payment' | 'monthly_rest';
+  title: string;
+  subtitle?: string;
+  data: any[];
+  monthName?: string;
+  year?: number;
 }
 
 interface ExecutiveBiDashboardProps {
@@ -99,6 +114,11 @@ interface ExecutiveBiDashboardProps {
   isAdmin?: boolean;
 }
 
+const MONTH_NAMES = [
+  'January', 'February', 'March', 'April', 'May', 'June',
+  'July', 'August', 'September', 'October', 'November', 'December'
+];
+
 export default function ExecutiveBiDashboard({
   arrivals = [],
   saudas = [],
@@ -122,8 +142,47 @@ export default function ExecutiveBiDashboard({
   isAdmin
 }: ExecutiveBiDashboardProps) {
 
-  // Global Filters State (Removed)
+  // Dynamic Year Dropdown & Last Sync State
+  const [lastSyncTime, setLastSyncTime] = useState<string>(() => new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit' }));
+  const [serverSummary, setServerSummary] = useState<any>(null);
+  const [serverLoading, setServerLoading] = useState(false);
+  const [serverError, setServerError] = useState<string | null>(null);
   
+  // Dynamic Year Selection for Month-Wise Summary
+  const [selectedYear, setSelectedYear] = useState<number>(() => new Date().getFullYear());
+
+  // Single-request Server Aggregation RPC Loader
+  const loadServerSummary = async (yr: number) => {
+    setServerLoading(true);
+    setServerError(null);
+    try {
+      const res = await fetch('/api/dashboard/summary', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ year: yr })
+      });
+      if (!res.ok) {
+        throw new Error(`Server returned ${res.status}`);
+      }
+      const data = await res.json();
+      if (data && data.success) {
+        setServerSummary(data);
+        setLastSyncTime(new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit' }));
+      } else {
+        throw new Error(data?.error || 'Failed to aggregate dashboard summary');
+      }
+    } catch (err: any) {
+      console.warn('[Dashboard RPC notice]: using synchronized fallback', err.message);
+      setServerError(err.message || 'Database query failed');
+    } finally {
+      setServerLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadServerSummary(selectedYear);
+  }, [selectedYear]);
+
   // Card Sub-Toggles (Total / Sauda / P.T.F)
   const [saudaViewMode, setSaudaViewMode] = useState<'all' | 'sauda' | 'ptf'>('all');
   const [pendingSaudaViewMode, setPendingSaudaViewMode] = useState<'all' | 'sauda' | 'ptf'>('all');
@@ -137,113 +196,368 @@ export default function ExecutiveBiDashboard({
 
   // View Controls
   const [isFullScreen, setIsFullScreen] = useState(false);
-  const [selectedChartTab, setSelectedChartTab] = useState<'overview' | 'suppliers' | 'quality' | 'factory' | 'finance'>('overview');
+  const [selectedChartTab, setSelectedChartTab] = useState<'overview' | 'monthly' | 'suppliers' | 'quality' | 'factory' | 'finance'>('overview');
+
+  // Drill-down Modal State
+  const [drillDown, setDrillDown] = useState<DrillDownState>({
+    isOpen: false,
+    type: 'sauda',
+    title: '',
+    data: []
+  });
+  const [drillDownSearch, setDrillDownSearch] = useState('');
+  const [drillDownPage, setDrillDownPage] = useState(1);
+  const drillDownRowsPerPage = 15;
 
   // Colors Palette for Enterprise BI
   const COLORS = ['#1E331B', '#2E6B3E', '#3D8B55', '#4E9F67', '#C5A059', '#15803D', '#059669', '#10B981', '#65A30D'];
 
-  // Extract unique filter lists from real database arrays
-  const uniqueSuppliers = useMemo(() => {
-    const set = new Set<string>();
-    arrivals.forEach(a => { if (a.supplier_name || a.supplier) set.add(a.supplier_name || a.supplier); });
-    saudas.forEach(s => { if (s.supplier_name || s.supplier) set.add(s.supplier_name || s.supplier); });
-    return Array.from(set).filter(Boolean).sort();
-  }, [arrivals, saudas]);
+  // Helper to extract year safely from date strings
+  const getYearFromDate = (dStr?: string | null): number | null => {
+    if (!dStr) return null;
+    const str = String(dStr).trim();
+    if (!str || str === 'null' || str === 'undefined' || str === '-') return null;
+    try {
+      const d = new Date(str);
+      if (!isNaN(d.getTime())) {
+        const y = d.getFullYear();
+        if (y >= 2020 && y <= 2040) return y;
+      }
+      const parts = str.split(/[-/]/);
+      if (parts.length === 3) {
+        if (parts[2].length === 4) {
+          const y = parseInt(parts[2], 10);
+          if (y >= 2020 && y <= 2040) return y;
+        }
+        if (parts[0].length === 4) {
+          const y = parseInt(parts[0], 10);
+          if (y >= 2020 && y <= 2040) return y;
+        }
+      }
+    } catch (_) {}
+    return null;
+  };
 
-  const uniqueBrokers = useMemo(() => {
-    const set = new Set<string>();
-    arrivals.forEach(a => { if (a.broker_name || a.broker) set.add(a.broker_name || a.broker); });
-    saudas.forEach(s => { if (s.broker_name || s.broker) set.add(s.broker_name || s.broker); });
-    return Array.from(set).filter(Boolean).sort();
-  }, [arrivals, saudas]);
+  // Helper to extract month index (0-11) from date strings
+  const getMonthIndexFromDate = (dStr?: string | null): number | null => {
+    if (!dStr) return null;
+    const str = String(dStr).trim();
+    if (!str || str === 'null' || str === 'undefined' || str === '-') return null;
+    try {
+      const d = new Date(str);
+      if (!isNaN(d.getTime())) {
+        return d.getMonth();
+      }
+      const parts = str.split(/[-/]/);
+      if (parts.length === 3) {
+        if (parts[2].length === 4) {
+          const m = parseInt(parts[1], 10) - 1;
+          if (m >= 0 && m <= 11) return m;
+        }
+        if (parts[0].length === 4) {
+          const m = parseInt(parts[1], 10) - 1;
+          if (m >= 0 && m <= 11) return m;
+        }
+      }
+    } catch (_) {}
+    return null;
+  };
 
-  const uniqueGodowns = useMemo(() => {
-    if (godowns && godowns.length > 0) {
-      return godowns.map(g => g.gdn_name || `GDN-${g.gdn_code}`);
+  // Dynamically compute all available years from database records + server years
+  const availableYears = useMemo(() => {
+    const yearSet = new Set<number>();
+    const currentYear = new Date().getFullYear();
+    yearSet.add(currentYear);
+
+    if (serverSummary?.availableYears && Array.isArray(serverSummary.availableYears)) {
+      serverSummary.availableYears.forEach((y: number) => yearSet.add(y));
     }
-    return ['GDN 1', 'GDN 2', 'GDN 3', 'GDN 4', 'GDN 5', 'OUTSIDE', 'MILL SHED'];
-  }, [godowns]);
 
-  const uniqueGrades = useMemo(() => {
-    const set = new Set<string>();
-    arrivals.forEach(a => { if (a.jute_grade || a.grade) set.add(a.jute_grade || a.grade); });
-    saudas.forEach(s => { if (s.grade || s.jute_grade) set.add(s.grade || s.jute_grade); });
-    if (set.size === 0) return ['TD-4', 'TD-5', 'TD-6', 'W-5', 'MESTA'];
-    return Array.from(set).filter(Boolean).sort();
-  }, [arrivals, saudas]);
+    const checkRecordYear = (rec: any) => {
+      if (!rec) return;
+      const candidates = [
+        rec.date, rec.po_date, rec.b_date, rec.payment_date, 
+        rec.created_at, rec.arrival_date, rec.bill_date
+      ];
+      for (const c of candidates) {
+        const y = getYearFromDate(c);
+        if (y) yearSet.add(y);
+      }
+    };
 
-  // Filtered arrivals & dataset
-  const filteredArrivals = arrivals;
+    saudas.forEach(checkRecordYear);
+    saudaCheckPoints.forEach(checkRecordYear);
+    pos.forEach(checkRecordYear);
+    paymentRecords.forEach(checkRecordYear);
+    arrivals.forEach(checkRecordYear);
 
-  // Key Aggregated Metrics
-  const metrics = useMemo(() => {
-    const list = filteredArrivals.length > 0 ? filteredArrivals : arrivals;
-    const totalArrivalsCount = list.length;
+    return Array.from(yearSet).sort((a, b) => b - a);
+  }, [saudas, saudaCheckPoints, pos, paymentRecords, arrivals, serverSummary]);
+
+  // Ensure selectedYear is within availableYears on mount/update
+  useEffect(() => {
+    if (availableYears.length > 0 && !availableYears.includes(selectedYear)) {
+      setSelectedYear(availableYears[0]);
+    }
+  }, [availableYears, selectedYear]);
+
+  // Unified Contract & PO Deduction Helpers
+  const isPtfRow = (r: any): boolean => {
+    if (!r) return false;
+    const poStr = String(r.po_no || r.contract_po_no || r.ptf_no || '').trim().toUpperCase();
+    const typeStr = String(r.sauda_type || r.po_type || r.type || '').trim().toUpperCase();
+    if (poStr.includes('/T') || poStr.includes('-T') || poStr.startsWith('T') || poStr.includes('PTF')) return true;
+    if (typeStr === 'PTF' || typeStr.includes('P.T.F') || typeStr.includes('DIRECT')) return true;
+    return false;
+  };
+
+  // Helper to extract clean metrics from any contract / PO row
+  const getRowMetrics = (r: any) => {
+    const wt = Number(r.total_wt_in_ton || r.total_contract_mt || r.contract_mt || r.weight_in_ton || r.weight_mt || 0) || 0;
     
-    // Total Weight Qtl & MT
-    const rawQtl = list.reduce((sum, item) => {
-      return sum + (Number(item.weight || item.weight_qtl || item.electronic_net_weight || 0) || 0);
-    }, 0);
-
-    const totalWeightQtl = Number(rawQtl.toFixed(2));
-    const totalWeightMT = Number((rawQtl / 10).toFixed(2));
-
-    // 1. Calculate Purchase/Sauda Value
-    let rawSaudaVal = saudas.reduce((acc, curr) => {
-      const val = Number(curr.total_value) || (Number(curr.b_rate || curr.rate || 5800) * Number(curr.total_wt_in_ton || curr.contract_mt || 10) * 10) || 0;
-      return acc + val;
-    }, 0);
-
-    // Fallbacks if saudas is empty: check pos or arrivals
-    if (rawSaudaVal === 0 && pos && pos.length > 0) {
-      rawSaudaVal = pos.reduce((acc, curr) => {
-        const val = Number(curr.total_contract_value || curr.contract_value || curr.amount) || (Number(curr.rate || 5800) * Number(curr.total_contract_mt || 10) * 10) || 0;
-        return acc + val;
-      }, 0);
-    }
-    if (rawSaudaVal === 0 && list.length > 0) {
-      rawSaudaVal = list.reduce((acc, item) => {
-        const wtQtl = Number(item.weight || item.weight_qtl || item.electronic_net_weight || 0) || 0;
-        const rate = Number(item.rate || item.b_rate || 5800);
-        return acc + (wtQtl * rate);
-      }, 0);
+    // Details sum fallback
+    let detQty = 0;
+    let detVal = 0;
+    if (r.details && Array.isArray(r.details)) {
+      r.details.forEach((d: any) => {
+        detQty += Number(d.quantity || d.units || d.bales || 0);
+        detVal += Number(d.amount || d.total_amount || 0);
+      });
     }
 
-    const totalSaudaValueLakhs = Number((rawSaudaVal / 100000).toFixed(2));
+    const qty = detQty > 0 ? detQty : (Number(r.total_units || r.units_per_lorry || r.packets || r.bales || 0) || 0);
+    const baseRate = Number(r.b_rate || r.rate || 5800);
+    const val = detVal > 0 ? detVal : (Number(r.total_contract_value || r.total_value || r.amount || 0) || (wt * 10 * (baseRate > 0 ? baseRate : 5800)));
+    const sup = r.supplier || r.supplier_name || r.challan_supplier;
+    const brk = r.broker || r.broker_name;
 
-    // 2. Active Contracts Count & MT
-    let activeContractsCount = saudas.length;
-    let totalSaudaMT = saudas.reduce((acc, curr) => {
-      return acc + (Number(curr.total_wt_in_ton || curr.contract_mt) || 0);
-    }, 0);
+    return { wt, qty, val, sup, brk };
+  };
 
-    if (activeContractsCount === 0 && pos && pos.length > 0) {
-      activeContractsCount = pos.length;
-      totalSaudaMT = pos.reduce((acc, curr) => {
-        return acc + (Number(curr.total_contract_mt || curr.contract_mt || 0) || 0);
-      }, 0);
+  // --- CORE SYSTEM METRICS CALCULATION (SINGLE-PASS RECONCILIATION WITH SERVER RPC ACCELERATION) ---
+  const metrics = useMemo(() => {
+    // 1. Raw Arrivals MT & Qtl
+    const list = arrivals || [];
+    const totalArrivalsCount = list.length;
+    let totalWeightQtl = 0;
+    
+    list.forEach(item => {
+      const wtQtl = Number(item.weight || item.weight_qtl || item.electronic_net_weight || 0) || 0;
+      totalWeightQtl += wtQtl;
+    });
+    const totalWeightMT = Number((totalWeightQtl / 10).toFixed(2));
+
+    // 2. Sauda Check Point Processing (Deduplicated)
+    const scpMap = new Map<string, any>();
+    (saudaCheckPoints || []).forEach((r: any) => {
+      const k = String(r.po_no || r.ptf_no || r.sauda_no || r.id || '').trim().toUpperCase();
+      if (k) scpMap.set(k, { ...r, _source: 'sauda_check_point' });
+    });
+
+    const scpList = Array.from(scpMap.values());
+
+    // Sauda Check Point Status Classifications
+    let scpPendingCount = 0;
+    let scpPendingWeight = 0;
+    let scpPendingValue = 0;
+
+    let scpPassedCount = 0;
+    let scpMismatchCount = 0;
+    let scpCompletedCount = 0;
+
+    let scpPtfTotalCount = 0;
+    let scpPtfTotalWeight = 0;
+    let scpPtfTotalValue = 0;
+    let scpPtfPendingCount = 0;
+    let scpPtfPendingWeight = 0;
+
+    let scpSaudaTotalCount = 0;
+    let scpSaudaTotalWeight = 0;
+    let scpSaudaTotalValue = 0;
+    let scpSaudaPendingCount = 0;
+    let scpSaudaPendingWeight = 0;
+
+    scpList.forEach((r: any) => {
+      const isPtf = isPtfRow(r);
+      const { wt, val } = getRowMetrics(r);
+      const st = String(r.status || '').trim().toLowerCase();
+      const pendStr = String(r.pending ?? '').trim().toLowerCase();
+
+      const isPending = (
+        st === 'pending' || 
+        pendStr === 'yes' || 
+        pendStr === 'true' || 
+        r.pending === true || 
+        r.pending === 1
+      ) && (
+        st !== 'passed' && 
+        st !== 'approved' && 
+        st !== 'final' && 
+        st !== 'moved_to_final' && 
+        st !== 'completed' && 
+        st !== 'settled' && 
+        st !== 'rejected' && 
+        st !== 'cancelled'
+      );
+
+      if (isPending) {
+        scpPendingCount++;
+        scpPendingWeight += wt;
+        scpPendingValue += val;
+      }
+
+      if (st === 'approved' || st === 'passed' || st === 'final' || st === 'moved_to_final') {
+        scpPassedCount++;
+      } else if (st === 'mismatch') {
+        scpMismatchCount++;
+      } else if (st === 'completed' || st === 'settled') {
+        scpCompletedCount++;
+      }
+
+      if (isPtf) {
+        scpPtfTotalCount++;
+        scpPtfTotalWeight += wt;
+        scpPtfTotalValue += val;
+        if (isPending) {
+          scpPtfPendingCount++;
+          scpPtfPendingWeight += wt;
+        }
+      } else {
+        scpSaudaTotalCount++;
+        scpSaudaTotalWeight += wt;
+        scpSaudaTotalValue += val;
+        if (isPending) {
+          scpSaudaPendingCount++;
+          scpSaudaPendingWeight += wt;
+        }
+      }
+    });
+
+    // 3. Combined Unique Generated P.O. Total (Deduplicated across Sauda Check Point + Final P.O)
+    const uniquePoMap = new Map<string, any>();
+    
+    // 3a. From Sauda Check Point where PO was generated
+    scpList.forEach((r: any) => {
+      const poKey = String(r.po_no || r.ptf_no || '').trim().toUpperCase();
+      if (poKey && poKey !== 'N/A' && poKey !== '-') {
+        uniquePoMap.set(poKey, {
+          ...r,
+          po_no: poKey,
+          source_section: 'Sauda Check Point',
+          display_status: r.status || (r.pending ? 'Pending' : 'Completed')
+        });
+      }
+    });
+
+    // 3b. From Final P.O. (purchase_master)
+    (pos || []).forEach((p: any) => {
+      const poKey = String(p.po_no || p.contract_po_no || p.ptf_no || '').trim().toUpperCase();
+      if (poKey && poKey !== 'N/A' && poKey !== '-') {
+        const existing = uniquePoMap.get(poKey);
+        uniquePoMap.set(poKey, {
+          ...(existing || {}),
+          ...p,
+          po_no: poKey,
+          source_section: existing ? 'Both (Check Point & Final P.O)' : 'Final P.O',
+          display_status: p.status || (p.pending === false || p.pending === 'No' ? 'Completed' : 'Pending')
+        });
+      }
+    });
+
+    const combinedUniquePos = Array.from(uniquePoMap.values());
+    const totalGeneratedPoCount = serverSummary?.summary?.totalGeneratedPo?.totalCount ?? combinedUniquePos.length;
+    let totalGeneratedPoWeight = serverSummary?.summary?.totalGeneratedPo?.totalWeightMT ?? 0;
+    let totalGeneratedPoPendingCount = serverSummary?.summary?.totalGeneratedPo?.pendingCount ?? 0;
+    let totalGeneratedPoCompletedCount = serverSummary?.summary?.totalGeneratedPo?.completedCount ?? 0;
+
+    if (!serverSummary?.summary?.totalGeneratedPo) {
+      combinedUniquePos.forEach((p: any) => {
+        const wt = Number(p.total_contract_mt || p.contract_mt || p.total_wt_in_ton || 0) || 0;
+        totalGeneratedPoWeight += wt;
+
+        const st = String(p.display_status || p.status || '').toLowerCase().trim();
+        const isPend = p.pending === true || p.pending === 'Yes' || st === 'pending' || st === 'active';
+        if (isPend && st !== 'completed' && st !== 'settled') {
+          totalGeneratedPoPendingCount++;
+        } else {
+          totalGeneratedPoCompletedCount++;
+        }
+      });
     }
 
-    // 3. Godown Stock / Stock Inventory Module Analytics (Current Stock Balance & Weight)
-    // Sourced directly from Stock Inventory formula (`StockSummary.tsx`):
-    // 1. Total Opening Stock:
-    const totalOpeningQty = (openingStocks || []).reduce((sum: number, r: any) => sum + (Number(r.quantity || r.opening_balance || r.bales || 0) || 0), 0);
-    const totalOpeningWt = (openingStocks || []).reduce((sum: number, r: any) => sum + (Number(r.weight || r.weight_qtl || 0) || 0), 0);
+    // 4. Payment Module Reconciled Financials (payment_master)
+    let totalPaymentPayableAmt = serverSummary?.summary?.totalPayment?.payableAmt ?? 0;
+    let advancePaymentPaidAmt = serverSummary?.summary?.totalPayment?.advanceAmt ?? 0;
+    let restPaymentPaidAmt = serverSummary?.summary?.totalPayment?.restPaidAmt ?? 0;
+    let totalPaymentPaidAmt = serverSummary?.summary?.totalPayment?.paidAmt ?? 0;
+    let outstandingRestPaymentAmt = serverSummary?.summary?.totalPayment?.outstandingAmt ?? 0;
 
-    // 2. Inwards to Godown (issue_type === 'GODOWN')
+    let totalPaymentVouchersCount = serverSummary?.summary?.totalPayment?.totalVouchers ?? 0;
+    let clearedVouchersCount = serverSummary?.summary?.totalPayment?.clearedVouchers ?? 0;
+    let pendingVouchersCount = serverSummary?.summary?.totalPayment?.pendingVouchers ?? 0;
+
+    if (!serverSummary?.summary?.totalPayment) {
+      const activePayments = paymentRecords || [];
+      totalPaymentVouchersCount = activePayments.length;
+
+      activePayments.forEach((p: any) => {
+        const payableVal = Number(p.payable_amt ?? p.total_amount ?? p.net_amt ?? 0);
+        const paidVal = Number(p.paid_amount || 0);
+        
+        totalPaymentPayableAmt += (payableVal > 0 ? payableVal : paidVal);
+        totalPaymentPaidAmt += paidVal;
+        advancePaymentPaidAmt += paidVal;
+
+        const restDue = Math.max(0, payableVal - paidVal);
+        const status = String(p.status || p.payment_status || '').toLowerCase().trim();
+        const isCleared = status === 'completed' || status === 'paid' || (payableVal > 0 && paidVal >= payableVal - 0.5);
+
+        if (isCleared) {
+          clearedVouchersCount++;
+        } else {
+          outstandingRestPaymentAmt += restDue;
+          if (restDue > 0.5 || status === 'pending' || status === 'partially_paid') {
+            pendingVouchersCount++;
+          }
+        }
+      });
+    }
+
+    // 5. Godown Stock / Stock Inventory Module Calculation with Unit Conversions (Bales / Drums / MT)
+    // 1 Bale = ~180-200 Kgs / 1.8 Quintals / 0.18 MT
+    // 1 Drum = ~200 Kgs / 2.0 Quintals / 0.20 MT
+    // 1 MT = 10 Quintals = 1,000 Kgs
+    let totalOpeningBales = 0;
+    let totalOpeningDrums = 0;
+    let totalOpeningMt = 0;
+
+    (openingStocks || []).forEach((r: any) => {
+      const uom = String(r.unit || r.uom || 'BALES').trim().toUpperCase();
+      const qty = Number(r.quantity ?? r.opening_balance ?? r.bales ?? 0);
+      const wtQtl = Number(r.weight ?? r.weight_qtl ?? 0);
+
+      if (uom.includes('DRUM')) {
+        totalOpeningDrums += qty;
+      } else {
+        totalOpeningBales += qty;
+      }
+
+      if (wtQtl > 0) {
+        totalOpeningMt += (wtQtl / 10);
+      } else if (qty > 0) {
+        totalOpeningMt += (uom.includes('DRUM') ? (qty * 0.20) : (qty * 0.18));
+      }
+    });
+
     const godownIssueNosSet = new Set(
       (millIssueMasters || [])
         .filter((m: any) => String(m.issue_type || '').trim().toUpperCase() === 'GODOWN')
         .map((m: any) => String(m.issue_no).trim().toUpperCase())
     );
-    const totalIssuedToGodownBales = (millIssueDetails || [])
-      .filter((d: any) => godownIssueNosSet.has(String(d.issue_no).trim().toUpperCase()))
-      .reduce((sum: number, d: any) => sum + (Number(d.qty) || 0), 0);
-    const totalIssuedToGodownWeight = (millIssueDetails || [])
-      .filter((d: any) => godownIssueNosSet.has(String(d.issue_no).trim().toUpperCase()))
-      .reduce((sum: number, d: any) => sum + ((Number(d.weight_kgs) || 0) / 100), 0);
+    let totalStockInwardBales = 0;
+    let totalStockInwardDrums = 0;
+    let totalStockInwardMt = 0;
 
-    // 3. Outwards to Factory / Consumption (issue_type in ['FACTORY', 'FACTORY ISSUE', 'SELL'])
     const factoryIssueNosSet = new Set(
       (millIssueMasters || [])
         .filter((m: any) => {
@@ -252,1633 +566,966 @@ export default function ExecutiveBiDashboard({
         })
         .map((m: any) => String(m.issue_no).trim().toUpperCase())
     );
-    const totalIssuedToFactoryBales = (millIssueDetails || [])
-      .filter((d: any) => factoryIssueNosSet.has(String(d.issue_no).trim().toUpperCase()))
-      .reduce((sum: number, d: any) => sum + (Number(d.qty) || 0), 0);
-    const totalIssuedToFactoryWeight = (millIssueDetails || [])
-      .filter((d: any) => factoryIssueNosSet.has(String(d.issue_no).trim().toUpperCase()))
-      .reduce((sum: number, d: any) => sum + ((Number(d.weight_kgs) || 0) / 100), 0);
+    let totalStockOutwardBales = 0;
+    let totalStockOutwardDrums = 0;
+    let totalStockOutwardMt = 0;
 
-    // Current Stock Balance = Opening + In - Out
-    let godownStockBales = totalOpeningQty + totalIssuedToGodownBales - totalIssuedToFactoryBales;
-    let totalStockMt = Number((totalOpeningWt + totalIssuedToGodownWeight - totalIssuedToFactoryWeight).toFixed(3));
+    (millIssueDetails || []).forEach((d: any) => {
+      const iNo = String(d.issue_no).trim().toUpperCase();
+      const qty = Number(d.qty || 0);
+      const wtKgs = Number(d.weight_kgs || 0);
+      const wtMt = wtKgs > 0 ? (wtKgs / 1000) : (qty * 0.18);
+      const itemType = String(d.item_type || d.quality || '').toUpperCase();
 
-    let totalCapacity = 0;
-    if (godowns && godowns.length > 0) {
-      godowns.forEach((g: any) => {
-        totalCapacity += Number(g.gdn_capacity || g.capacity || 450);
+      if (godownIssueNosSet.has(iNo)) {
+        if (itemType.includes('DRUM')) totalStockInwardDrums += qty;
+        else totalStockInwardBales += qty;
+        totalStockInwardMt += wtMt;
+      } else if (factoryIssueNosSet.has(iNo)) {
+        if (itemType.includes('DRUM')) totalStockOutwardDrums += qty;
+        else totalStockOutwardBales += qty;
+        totalStockOutwardMt += wtMt;
+      }
+    });
+
+    let currentGodownStockBales = serverSummary?.summary?.godownStock?.currentStockBales ?? (totalOpeningBales + totalStockInwardBales - totalStockOutwardBales);
+    let currentGodownStockDrums = serverSummary?.summary?.godownStock?.currentStockDrums ?? (totalOpeningDrums + totalStockInwardDrums - totalStockOutwardDrums);
+    let currentGodownStockMt = serverSummary?.summary?.godownStock?.currentStockMt ?? Number((totalOpeningMt + totalStockInwardMt - totalStockOutwardMt).toFixed(3));
+
+    let totalGodownCapacity = serverSummary?.summary?.godownStock?.totalCapacity ?? 0;
+    if (totalGodownCapacity === 0) {
+      (godowns || []).forEach((g: any) => {
+        totalGodownCapacity += Number(g.gdn_capacity || g.capacity || 450);
       });
     }
-    if (totalCapacity === 0) totalCapacity = 13200;
+    if (totalGodownCapacity === 0) totalGodownCapacity = 13200;
 
-    // Fallback if no records exist in Stock Inventory yet
-    if (godownStockBales <= 0 && openingStocks.length === 0 && totalStockMt <= 0) {
-      if (totalWeightMT > 0) {
-        totalStockMt = Number((totalWeightMT * 1.5).toFixed(2));
-        godownStockBales = Math.round(totalStockMt * 10 * 0.55);
-      }
+    // Fallback if stock tables are empty but arrivals exist
+    if (currentGodownStockBales <= 0 && openingStocks.length === 0 && currentGodownStockMt <= 0 && totalWeightMT > 0) {
+      currentGodownStockMt = Number((totalWeightMT * 1.5).toFixed(2));
+      currentGodownStockBales = Math.round(currentGodownStockMt * 10 * 0.55);
     }
 
-    const godownUtilPct = totalCapacity > 0 ? Number(((totalStockMt / totalCapacity) * 100).toFixed(1)) : 0;
-    const stockValuationCr = Number(((totalStockMt * 10 * 5800) / 10000000).toFixed(2));
-
-    // 4. Moisture Rating
-    const moistureItems = list.map(a => Number(a.moisture)).filter(m => !isNaN(m) && m > 0);
-    const avgMoisture = moistureItems.length > 0
-      ? Number((moistureItems.reduce((a, b) => a + b, 0) / moistureItems.length).toFixed(2))
-      : 14.18;
-
-    // 5. Daily Production & Dispatch Output
-    const dailyProdMT = (totalWeightMT > 0 ? Number((totalWeightMT * 0.4).toFixed(1)) : 142.5);
-    const loomEfficiency = 94.2;
-    const dailyDispatchMT = (totalWeightMT > 0 ? Number((totalWeightMT * 0.25).toFixed(1)) : 98.0);
-
-    // 6. Active Vendor Counts
-    const activeSuppliersCount = uniqueSuppliers.length || (list.length > 0 ? new Set(list.map(l => l.supplier_name || l.supplier)).size : 24);
-    const activeBrokersCount = uniqueBrokers.length || (list.length > 0 ? new Set(list.map(l => l.broker_name || l.broker)).size : 18);
-
-    // 7. Sauda Check Point & Final P.O Breakdown Analytics
-    // CARD 1: Total Contracts = Sauda Check Point (`sauda_check_point`) + Final P.O (`purchase_master` / `pos`)
-    // CARD 2: Pending Sauda = Sauda Check Point (`sauda_check_point`) strictly where status is Pending
-
-    const scpDetailsList = saudaCheckPointDetails || [];
-    const detailsByPo: Record<string, any[]> = {};
-    scpDetailsList.forEach((d: any) => {
-      const k = String(d.po_no || '').trim().toUpperCase();
-      if (!k) return;
-      if (!detailsByPo[k]) detailsByPo[k] = [];
-      detailsByPo[k].push(d);
-    });
-
-    const isPtfRow = (r: any) => Boolean(
-      r.is_ptf ||
-      (r.ptf_no && String(r.ptf_no).trim() && String(r.ptf_no).trim().toUpperCase() !== 'N/A') ||
-      String(r.po_type || '').toUpperCase() === 'PTF' ||
-      String(r.po_identification || '').toUpperCase() === 'PTF' ||
-      String(r.po_no || '').trim().toUpperCase().startsWith('PTF') ||
-      String(r.po_no || '').trim().toUpperCase().includes('(PTF)') ||
-      String(r.ptf_no || '').trim().toUpperCase().includes('(PTF)')
-    );
-
-    const getRowMetrics = (r: any) => {
-      const poKey = String(r.po_no || r.ptf_no || '').trim().toUpperCase();
-      const poDetails = detailsByPo[poKey] || [];
-
-      let detWt = 0;
-      let detQty = 0;
-      let detVal = 0;
-      poDetails.forEach((d: any) => {
-        const w = Number(d.weight_mt || 0);
-        const q = Number(d.quantity || 0);
-        const rate = Number(d.rate_qntl || 0);
-        detWt += w;
-        detQty += q;
-        detVal += (w * 10 * rate);
-      });
-
-      const wt = detWt > 0 ? detWt : (Number(r.total_contract_mt || r.contract_mt || r.total_wt_in_ton || r.weight || 0) || 0);
-      const qty = detQty > 0 ? detQty : (Number(r.total_units || r.units_per_lorry || r.packets || r.bales || 0) || 0);
-      const baseRate = Number(r.b_rate || r.rate || 5800);
-      const val = detVal > 0 ? detVal : (Number(r.total_contract_value || r.total_value || r.amount || 0) || (wt * 10 * (baseRate > 0 ? baseRate : 5800)));
-      const sup = r.supplier || r.supplier_name || r.challan_supplier;
-      const brk = r.broker || r.broker_name;
-
-      return { wt, qty, val, sup, brk };
-    };
-
-    // --- CARD 1: TOTAL ALL CONTRACTS (SAUDA CHECK POINT + FINAL P.O) ---
-    const contractMap = new Map<string, any>();
-    (saudaCheckPoints || []).forEach((r: any) => {
-      const k = String(r.po_no || r.ptf_no || r.sauda_no || r.id || '').trim().toUpperCase();
-      if (k) contractMap.set(k, { ...r, _source: 'sauda_check_point' });
-    });
-    (pos || []).forEach((r: any) => {
-      const k = String(r.po_no || r.ptf_no || r.contract_po_no || r.sauda_no || r.id || '').trim().toUpperCase();
-      if (k) {
-        const existing = contractMap.get(k) || {};
-        contractMap.set(k, { ...existing, ...r, _source: 'purchase_master', _inFinalPo: true });
-      }
-    });
-
-    let totalContractsList = Array.from(contractMap.values());
-    if (totalContractsList.length === 0 && saudas && saudas.length > 0) {
-      totalContractsList = saudas;
-    }
-
-    let ptfCount = 0;
-    let ptfWeight = 0;
-    let ptfValue = 0;
-    let ptfBales = 0;
-    const ptfSuppliers = new Set<string>();
-    const ptfBrokers = new Set<string>();
-
-    let scpSaudaCount = 0;
-    let scpSaudaWeight = 0;
-    let scpSaudaValue = 0;
-    let scpSaudaBales = 0;
-    const scpSaudaSuppliers = new Set<string>();
-    const scpSaudaBrokers = new Set<string>();
-
-    totalContractsList.forEach((r: any) => {
-      const isPtf = isPtfRow(r);
-      const { wt, qty, val, sup, brk } = getRowMetrics(r);
-
-      if (isPtf) {
-        ptfCount++;
-        ptfWeight += wt;
-        ptfValue += val;
-        ptfBales += qty;
-        if (sup) ptfSuppliers.add(String(sup).trim());
-        if (brk) ptfBrokers.add(String(brk).trim());
-      } else {
-        scpSaudaCount++;
-        scpSaudaWeight += wt;
-        scpSaudaValue += val;
-        scpSaudaBales += qty;
-        if (sup) scpSaudaSuppliers.add(String(sup).trim());
-        if (brk) scpSaudaBrokers.add(String(brk).trim());
-      }
-    });
-
-    // --- CARD 2: PENDING SAUDA (SAUDA CHECK POINT ONLY WHERE STATUS IS PENDING) ---
-    const finalizedPoSet = new Set(
-      (pos || [])
-        .map((p: any) => String(p.po_no || p.ptf_no || p.contract_po_no || '').trim().toUpperCase())
-        .filter(Boolean)
-    );
-
-    const pendingScpRows = (saudaCheckPoints || []).filter((r: any) => {
-      const k = String(r.po_no || r.ptf_no || r.sauda_no || '').trim().toUpperCase();
-      const statusStr = String(r.status || '').trim().toLowerCase();
-      const pendingStr = String(r.pending ?? '').trim().toLowerCase();
-
-      // If already finalized or moved to Final P.O table, it is not pending in Check Point
-      if (k && finalizedPoSet.has(k)) return false;
-
-      // Status check:
-      if (statusStr === 'final' || statusStr === 'moved_to_final' || statusStr === 'completed' || statusStr === 'settled' || statusStr === 'closed' || statusStr.includes('passed to final')) {
-        return false;
-      }
-      if (pendingStr === 'no' || pendingStr === 'false' || r.pending === false || r.pending === 0) {
-        return false;
-      }
-      return true;
-    });
-
-    let ptfPendingCount = 0;
-    let ptfPendingWeight = 0;
-    let ptfPendingValue = 0;
-    let ptfPendingBales = 0;
-
-    let scpSaudaPendingCount = 0;
-    let scpSaudaPendingWeight = 0;
-    let scpSaudaPendingValue = 0;
-    let scpSaudaPendingBales = 0;
-
-    pendingScpRows.forEach((r: any) => {
-      const isPtf = isPtfRow(r);
-      const { wt, qty, val } = getRowMetrics(r);
-
-      if (isPtf) {
-        ptfPendingCount++;
-        ptfPendingWeight += wt;
-        ptfPendingValue += val;
-        ptfPendingBales += qty;
-      } else {
-        scpSaudaPendingCount++;
-        scpSaudaPendingWeight += wt;
-        scpSaudaPendingValue += val;
-        scpSaudaPendingBales += qty;
-      }
-    });
-
-    const totalScpCount = ptfCount + scpSaudaCount;
-    const totalScpWeight = Number((ptfWeight + scpSaudaWeight).toFixed(2));
-    const totalScpValueLakhs = Number(((ptfValue + scpSaudaValue) / 100000).toFixed(2));
-    const totalScpBales = ptfBales + scpSaudaBales;
-
-    const totalScpPendingCount = ptfPendingCount + scpSaudaPendingCount;
-    const totalScpPendingWeight = Number((ptfPendingWeight + scpSaudaPendingWeight).toFixed(2));
-    const totalScpPendingValueLakhs = Number(((ptfPendingValue + scpSaudaPendingValue) / 100000).toFixed(2));
-
-    const ptfWeightMT = Number(ptfWeight.toFixed(2));
-    const ptfValueLakhs = Number((ptfValue / 100000).toFixed(2));
-    const ptfPendingWeightMT = Number(ptfPendingWeight.toFixed(2));
-    const ptfPendingValueLakhs = Number((ptfPendingValue / 100000).toFixed(2));
-
-    const scpSaudaWeightMT = Number(scpSaudaWeight.toFixed(2));
-    const scpSaudaValueLakhs = Number((scpSaudaValue / 100000).toFixed(2));
-    const scpSaudaPendingWeightMT = Number(scpSaudaPendingWeight.toFixed(2));
-    const scpSaudaPendingValueLakhs = Number((scpSaudaPendingValue / 100000).toFixed(2));
-
-    const totalScpSuppliersCount = new Set([...ptfSuppliers, ...scpSaudaSuppliers]).size;
-    const totalScpBrokersCount = new Set([...ptfBrokers, ...scpSaudaBrokers]).size;
-
-    let latestSaudaDate = "N/A";
-    const allDateSources = [...totalContractsList, ...saudas];
-    if (allDateSources.length > 0) {
-      const sortedDates = allDateSources
-        .map(s => s.date || s.b_date || s.po_date || s.created_at)
-        .filter(Boolean)
-        .sort((a, b) => new Date(b).getTime() - new Date(a).getTime());
-      if (sortedDates.length > 0) {
-        try {
-          const d = new Date(sortedDates[0]);
-          if (!isNaN(d.getTime())) {
-            const day = String(d.getDate()).padStart(2, '0');
-            const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-            const month = monthNames[d.getMonth()];
-            const year = d.getFullYear();
-            latestSaudaDate = `${day}-${month}-${year}`;
-          }
-        } catch (_) {}
-      }
-    }
-
-    // 8. Payment Module Analytics (Total Payment, Advance Payment, Rest Payment)
-    // Sourced directly from Payment Module (`payment_master`):
-    // - "Total Payment": sum of "Payable Net Amount (₹)" -> `p.payable_amt` (or `p.total_amount`)
-    // - "Advance Payment": sum of "Paid Amount (₹)" -> `p.paid_amount`
-    // - "Rest Payment": sum of "Pending Amount" -> Math.max(0, p.payable_amt - p.paid_amount)
-    let totalPaymentAmt = 0;
-    let advancePaymentAmt = 0;
-    let restPaymentAmt = 0;
-    let totalPaymentCount = 0;
-    let paidVouchersCount = 0;
-    let pendingVouchersCount = 0;
-
-    const activePayments = paymentRecords || [];
-    totalPaymentCount = activePayments.length;
-
-    if (activePayments.length > 0) {
-      activePayments.forEach((p: any) => {
-        // Payable Net Amount (₹)
-        const payableVal = Number(p.payable_amt ?? p.total_amount ?? p.net_amt ?? p.value_amt ?? 0);
-        totalPaymentAmt += (payableVal > 0 ? payableVal : Number(p.paid_amount || 0));
-
-        // Paid Amount (₹)
-        const paidVal = Number(p.paid_amount || 0);
-        advancePaymentAmt += paidVal;
-
-        // Pending Amount (₹)
-        const pendingVal = Math.max(0, payableVal - paidVal);
-        const status = String(p.status || p.payment_status || '').toLowerCase().trim();
-        const isCleared = status === 'completed' || status === 'paid' || (payableVal > 0 && paidVal >= payableVal - 0.5);
-
-        if (isCleared) {
-          paidVouchersCount++;
-        } else if (pendingVal > 0.5 || status === 'pending' || status === 'partially_paid') {
-          pendingVouchersCount++;
-        }
-
-        restPaymentAmt += (isCleared ? 0 : pendingVal);
-      });
-    }
-
-    const totalPaymentLakhs = Number((totalPaymentAmt / 100000).toFixed(2));
-    const advancePaymentLakhs = Number((advancePaymentAmt / 100000).toFixed(2));
-    const restPaymentLakhs = Number((restPaymentAmt / 100000).toFixed(2));
+    const godownUtilizationPct = totalGodownCapacity > 0 
+      ? Number(((currentGodownStockMt / totalGodownCapacity) * 100).toFixed(1)) 
+      : 0;
 
     return {
       totalArrivalsCount,
-      totalWeightQtl,
       totalWeightMT,
-      totalSaudaValueLakhs: totalScpValueLakhs,
-      activeContractsCount: totalScpCount,
-      totalSaudaMT: totalScpWeight,
-      totalStockMt: Number(totalStockMt.toFixed(3)),
-      godownStockBales,
-      godownUtilPct,
-      stockValuationCr,
-      avgMoisture,
-      dailyProdMT,
-      loomEfficiency,
-      dailyDispatchMT,
-      activeSuppliersCount,
-      activeBrokersCount,
-      totalSaudaWeight: totalScpWeight,
-      totalSaudaRecordsCount: totalScpCount,
-      saudaBrokersCount: totalScpBrokersCount,
-      saudaSuppliersCount: totalScpSuppliersCount,
-      pendingSaudaCount: totalScpPendingCount,
-      pendingSaudaWeight: totalScpPendingWeight,
-      pendingSaudaValueLakhs: totalScpPendingValueLakhs,
-      pendingShipmentsCount: totalScpPendingCount,
-      activeSaudaCount: totalScpCount,
-      latestSaudaDate,
-      // Sauda Check Point & PTF detailed breakup object
+      // Sauda Check Point Card
+      scpTotalCount: serverSummary?.summary?.saudaCheckPoint?.totalCount ?? scpList.length,
+      scpTotalWeightMT: serverSummary?.summary?.saudaCheckPoint?.totalWeightMT ?? Number((scpPtfTotalWeight + scpSaudaTotalWeight).toFixed(2)),
+      scpTotalValueLakhs: serverSummary?.summary?.saudaCheckPoint?.totalValueLakhs ?? Number(((scpPtfTotalValue + scpSaudaTotalValue) / 100000).toFixed(2)),
+      scpPendingCount: serverSummary?.summary?.saudaCheckPoint?.pendingCount ?? scpPendingCount,
+      scpPendingWeightMT: serverSummary?.summary?.saudaCheckPoint?.pendingWeightMT ?? Number(scpPendingWeight.toFixed(2)),
+      scpPendingValueLakhs: serverSummary?.summary?.saudaCheckPoint?.pendingValueLakhs ?? Number((scpPendingValue / 100000).toFixed(2)),
+      scpPassedCount: serverSummary?.summary?.saudaCheckPoint?.passedCount ?? scpPassedCount,
+      scpMismatchCount: serverSummary?.summary?.saudaCheckPoint?.mismatchCount ?? scpMismatchCount,
+      scpCompletedCount: serverSummary?.summary?.saudaCheckPoint?.completedCount ?? scpCompletedCount,
       scpBreakup: {
         ptf: {
-          count: ptfCount,
-          weightMT: ptfWeightMT,
-          valueLakhs: ptfValueLakhs,
-          bales: ptfBales,
-          pendingCount: ptfPendingCount,
-          pendingWeightMT: ptfPendingWeightMT,
-          pendingValueLakhs: ptfPendingValueLakhs,
-          suppliersCount: ptfSuppliers.size,
-          brokersCount: ptfBrokers.size,
+          count: serverSummary?.summary?.saudaCheckPoint?.ptf?.count ?? scpPtfTotalCount,
+          weightMT: serverSummary?.summary?.saudaCheckPoint?.ptf?.weightMT ?? Number(scpPtfTotalWeight.toFixed(2)),
+          valueLakhs: serverSummary?.summary?.saudaCheckPoint?.ptf?.valueLakhs ?? Number((scpPtfTotalValue / 100000).toFixed(2)),
+          pendingCount: serverSummary?.summary?.saudaCheckPoint?.ptf?.pendingCount ?? scpPtfPendingCount,
+          pendingWeightMT: serverSummary?.summary?.saudaCheckPoint?.ptf?.pendingWeightMT ?? Number(scpPtfPendingWeight.toFixed(2))
         },
         sauda: {
-          count: scpSaudaCount,
-          weightMT: scpSaudaWeightMT,
-          valueLakhs: scpSaudaValueLakhs,
-          bales: scpSaudaBales,
-          pendingCount: scpSaudaPendingCount,
-          pendingWeightMT: scpSaudaPendingWeightMT,
-          pendingValueLakhs: scpSaudaPendingValueLakhs,
-          suppliersCount: scpSaudaSuppliers.size,
-          brokersCount: scpSaudaBrokers.size,
-        },
-        total: {
-          count: totalScpCount,
-          weightMT: totalScpWeight,
-          valueLakhs: totalScpValueLakhs,
-          bales: totalScpBales,
-          pendingCount: totalScpPendingCount,
-          pendingWeightMT: totalScpPendingWeight,
-          pendingValueLakhs: totalScpPendingValueLakhs,
-          suppliersCount: totalScpSuppliersCount,
-          brokersCount: totalScpBrokersCount,
+          count: serverSummary?.summary?.saudaCheckPoint?.sauda?.count ?? scpSaudaTotalCount,
+          weightMT: serverSummary?.summary?.saudaCheckPoint?.sauda?.weightMT ?? Number(scpSaudaTotalWeight.toFixed(2)),
+          valueLakhs: serverSummary?.summary?.saudaCheckPoint?.sauda?.valueLakhs ?? Number((scpSaudaTotalValue / 100000).toFixed(2)),
+          pendingCount: serverSummary?.summary?.saudaCheckPoint?.sauda?.pendingCount ?? scpSaudaPendingCount,
+          pendingWeightMT: serverSummary?.summary?.saudaCheckPoint?.sauda?.pendingWeightMT ?? Number(scpSaudaPendingWeight.toFixed(2))
         }
       },
-      totalPaymentLakhs,
-      advancePaymentLakhs,
-      restPaymentLakhs,
-      totalPaymentAmt,
-      advancePaymentAmt,
-      restPaymentAmt,
-      totalPaymentCount,
-      paidVouchersCount,
-      pendingVouchersCount
+      // Total Generated PO Card
+      totalGeneratedPoCount,
+      totalGeneratedPoWeightMT: Number(totalGeneratedPoWeight.toFixed(2)),
+      totalGeneratedPoPendingCount,
+      totalGeneratedPoCompletedCount,
+      combinedUniquePos,
+      // Total Payment Card
+      totalPaymentPayableAmt,
+      totalPaymentPaidAmt,
+      advancePaymentPaidAmt,
+      restPaymentPaidAmt,
+      outstandingRestPaymentAmt,
+      totalPaymentPayableLakhs: Number((totalPaymentPayableAmt / 100000).toFixed(2)),
+      totalPaymentPaidLakhs: Number((totalPaymentPaidAmt / 100000).toFixed(2)),
+      outstandingRestPaymentLakhs: Number((outstandingRestPaymentAmt / 100000).toFixed(2)),
+      totalPaymentVouchersCount,
+      clearedVouchersCount,
+      pendingVouchersCount,
+      // Godown Stock Card
+      currentGodownStockBales,
+      currentGodownStockDrums,
+      currentGodownStockMt,
+      totalOpeningQty: totalOpeningBales,
+      totalStockInwardBales,
+      totalStockOutwardBales,
+      godownUtilizationPct,
+      totalGodownCapacity,
+      scpList
     };
-  }, [filteredArrivals, arrivals, saudas, pos, saudaCheckPoints, saudaCheckPointDetails, godowns, openingStocks, millIssueMasters, millIssueDetails, paymentRecords, uniqueSuppliers, uniqueBrokers]);
+  }, [
+    arrivals, saudas, saudaCheckPoints, pos, paymentRecords, 
+    openingStocks, millIssueMasters, millIssueDetails, godowns, serverSummary
+  ]);
 
-  // Chart Data 1: Purchase Tonnage & Cost Trend (Daily/Monthly)
-  const purchaseTrendData = useMemo(() => {
-    const list = filteredArrivals.length > 0 ? filteredArrivals : arrivals;
-    if (list && list.length > 0) {
-      const map: { [key: string]: { tonnageMT: number; costLakhs: number } } = {};
-      list.forEach(item => {
-        const d = item.created_at ? new Date(item.created_at).toLocaleDateString('en-IN', { day: '2-digit', month: 'short' }) : 'Today';
-        const wtQtl = Number(item.weight || item.weight_qtl || item.electronic_net_weight || 0) || 0;
-        const rate = Number(item.rate || item.b_rate || 5800);
-        if (!map[d]) map[d] = { tonnageMT: 0, costLakhs: 0 };
-        map[d].tonnageMT += (wtQtl / 10);
-        map[d].costLakhs += (wtQtl * rate) / 100000;
-      });
-      const entries = Object.entries(map).map(([period, val]) => ({
-        period,
-        tonnageMT: Number(val.tonnageMT.toFixed(2)),
-        costLakhs: Number(val.costLakhs.toFixed(2))
-      }));
-      if (entries.length > 0) return entries;
-    }
-    return [
-      { period: 'Day 1', tonnageMT: 38.5, costLakhs: 22.3 },
-      { period: 'Day 2', tonnageMT: 45.2, costLakhs: 26.1 },
-      { period: 'Day 3', tonnageMT: 52.8, costLakhs: 30.6 },
-      { period: 'Day 4', tonnageMT: 41.0, costLakhs: 23.8 },
-      { period: 'Day 5', tonnageMT: 68.4, costLakhs: 39.7 }
-    ];
-  }, [filteredArrivals, arrivals]);
+  // --- MONTH-WISE SUMMARY CALCULATION (ACCELERATED VIA SERVER RPC OR LOCAL IN-MEMORY) ---
+  const monthlySummaryData = useMemo(() => {
+    if (serverSummary?.monthly && Array.isArray(serverSummary.monthly) && serverSummary.year === selectedYear) {
+      return serverSummary.monthly.map((mItem: any) => {
+        const matchingSaudas = metrics.scpList.filter((r: any) => {
+          const y = getYearFromDate(r.date || r.po_date || r.b_date || r.created_at);
+          const m = getMonthIndexFromDate(r.date || r.po_date || r.b_date || r.created_at);
+          return y === selectedYear && m === mItem.monthIndex;
+        });
+        const matchingPendingSaudas = matchingSaudas.filter((r: any) => {
+          const st = String(r.status || '').trim().toLowerCase();
+          const pendStr = String(r.pending ?? '').trim().toLowerCase();
+          return (st === 'pending' || pendStr === 'yes' || pendStr === 'true' || r.pending === true || r.pending === 1) &&
+            (st !== 'passed' && st !== 'approved' && st !== 'final' && st !== 'completed' && st !== 'settled' && st !== 'cancelled' && st !== 'rejected');
+        });
+        const matchingPayments = (paymentRecords || []).filter((p: any) => {
+          const y = getYearFromDate(p.payment_date || p.created_at);
+          const m = getMonthIndexFromDate(p.payment_date || p.created_at);
+          return y === selectedYear && m === mItem.monthIndex;
+        });
 
-  // 7-Day Arrival vs Dispatch Trends Mini-Charts Data
-  const arrivalVsDispatch7Days = useMemo(() => {
-    const days = ['Day 1', 'Day 2', 'Day 3', 'Day 4', 'Day 5', 'Day 6', 'Today'];
-    return days.map((day, idx) => {
-      const factor = 0.85 + (idx * 0.03);
-      const arrivalMT = Number(((metrics.totalWeightMT > 0 ? metrics.totalWeightMT * 0.15 : 45.0) * factor).toFixed(1));
-      const dispatchMT = Number(((metrics.dailyDispatchMT > 0 ? metrics.dailyDispatchMT * 0.16 : 38.0) * factor).toFixed(1));
-      const arrivalBales = Math.round(arrivalMT * 20);
-      const dispatchBales = Math.round(dispatchMT * 20);
-      return {
-        day,
-        arrivalMT,
-        dispatchMT,
-        arrivalBales,
-        dispatchBales,
-        netDelta: Number((arrivalMT - dispatchMT).toFixed(1))
-      };
-    });
-  }, [metrics]);
-
-  // Chart Data 2: Quality Grade Composition (Stacked Bar)
-  const gradeCompositionData = useMemo(() => {
-    const list = filteredArrivals.length > 0 ? filteredArrivals : arrivals;
-    if (list && list.length > 0) {
-      const map: { [grade: string]: { qtl: number; totalCost: number } } = {};
-      let totalQtl = 0;
-      list.forEach(item => {
-        const grade = (item.jute_grade || item.grade || 'TD-4').toUpperCase();
-        const wtQtl = Number(item.weight || item.weight_qtl || item.electronic_net_weight || 0) || 0;
-        const rate = Number(item.rate || item.b_rate || 5800);
-        if (!map[grade]) map[grade] = { qtl: 0, totalCost: 0 };
-        map[grade].qtl += wtQtl;
-        map[grade].totalCost += (wtQtl * rate);
-        totalQtl += wtQtl;
-      });
-      const colorPalette = ['#1F4D2B', '#2E6B3E', '#C5A059', '#3B82F6', '#8B5CF6', '#EC4899'];
-      const entries = Object.entries(map).map(([grade, val], idx) => ({
-        grade,
-        qtl: Number(val.qtl.toFixed(2)),
-        pct: totalQtl > 0 ? Number(((val.qtl / totalQtl) * 100).toFixed(1)) : 0,
-        avgRate: val.qtl > 0 ? Math.round(val.totalCost / val.qtl) : 5800,
-        color: colorPalette[idx % colorPalette.length]
-      }));
-      if (entries.length > 0) return entries;
-    }
-    return [
-      { grade: 'TD-4', qtl: 1850, pct: 38, avgRate: 6100, color: '#1F4D2B' },
-      { grade: 'TD-5', qtl: 1420, pct: 29, avgRate: 5850, color: '#2E6B3E' },
-      { grade: 'TD-6', qtl: 890, pct: 18, avgRate: 5600, color: '#C5A059' },
-      { grade: 'W-5', qtl: 450, pct: 9, avgRate: 5400, color: '#3B82F6' },
-      { grade: 'MESTA', qtl: 240, pct: 6, avgRate: 5100, color: '#8B5CF6' }
-    ];
-  }, [filteredArrivals, arrivals]);
-
-  // Chart Data 3: Supplier Volume Share (Donut)
-  const supplierShareData = useMemo(() => {
-    const list = filteredArrivals.length > 0 ? filteredArrivals : arrivals;
-    if (list && list.length > 0) {
-      const map: { [sup: string]: number } = {};
-      let totalQtl = 0;
-      list.forEach(item => {
-        const sup = item.supplier_name || item.supplier || 'Supplier';
-        const wtQtl = Number(item.weight || item.weight_qtl || item.electronic_net_weight || 0) || 0;
-        map[sup] = (map[sup] || 0) + wtQtl;
-        totalQtl += wtQtl;
-      });
-      const entries = Object.entries(map).map(([name, val]) => ({
-        name,
-        value: Number(val.toFixed(2)),
-        share: totalQtl > 0 ? Number(((val / totalQtl) * 100).toFixed(1)) : 0
-      })).sort((a, b) => b.value - a.value).slice(0, 5);
-      if (entries.length > 0) return entries;
-    }
-    return [
-      { name: 'Shree Jute Traders', value: 1750, share: 36 },
-      { name: 'Bengal Fibre Corp', value: 1220, share: 25 },
-      { name: 'Eastern Baling Co.', value: 890, share: 18 },
-      { name: 'Kolkata Raw Jute', value: 580, share: 12 },
-      { name: 'Green Valley Jute', value: 410, share: 9 }
-    ];
-  }, [filteredArrivals, arrivals]);
-
-  // Chart Data 4: Broker Performance & Contract Fulfillment (Horizontal Bar)
-  const brokerPerformanceData = useMemo(() => {
-    const list = filteredArrivals.length > 0 ? filteredArrivals : arrivals;
-    if (list && list.length > 0) {
-      const map: { [brk: string]: number } = {};
-      list.forEach(item => {
-        const brk = item.broker_name || item.broker || 'Broker Agency';
-        const wtMT = (Number(item.weight || item.weight_qtl || item.electronic_net_weight || 0) || 0) / 10;
-        map[brk] = (map[brk] || 0) + wtMT;
-      });
-      const entries = Object.entries(map).map(([name, val], idx) => ({
-        name,
-        tonnageMT: Number(val.toFixed(2)),
-        fulfillment: Math.min(100, Math.max(80, 100 - idx * 3)),
-        rating: Number((4.9 - idx * 0.15).toFixed(1))
-      })).slice(0, 5);
-      if (entries.length > 0) return entries;
-    }
-    return [
-      { name: 'S. K. Enterprises', tonnageMT: 420, fulfillment: 98, rating: 4.9 },
-      { name: 'Gupta & Sons Jute', tonnageMT: 360, fulfillment: 95, rating: 4.8 },
-      { name: 'Royal Jute Agency', tonnageMT: 310, fulfillment: 92, rating: 4.6 },
-      { name: 'Mahabir Trading', tonnageMT: 270, fulfillment: 89, rating: 4.4 },
-      { name: 'Progressive Brokers', tonnageMT: 210, fulfillment: 85, rating: 4.2 }
-    ];
-  }, [filteredArrivals, arrivals]);
-
-  // Chart Data 5: Manufacturing Process Pipeline Flow
-  const pipelineFlowData = useMemo(() => {
-    return [
-      { stage: 'Gate Entry', val: 100, label: `${metrics.totalWeightMT} MT Gate Received` },
-      { stage: 'Quality Check', val: 98.2, label: `${Number((metrics.totalWeightMT * 0.98).toFixed(1))} MT Passed` },
-      { stage: 'Weighbridge', val: 97.8, label: `${metrics.totalWeightMT} MT Net Weight` },
-      { stage: 'Godown Storage', val: 97.8, label: `${metrics.totalStockMt} M.T. Stacked` },
-      { stage: 'Batching & Carding', val: 46.0, label: `${metrics.dailyProdMT} MT Issued` },
-      { stage: 'Spinning & Loom', val: 36.5, label: `${Number((metrics.dailyProdMT * 0.9).toFixed(1))} MT Yarns` },
-      { stage: 'Dispatch Finished', val: 19.6, label: `${metrics.dailyDispatchMT} MT Shipped` }
-    ];
-  }, [metrics]);
-
-  // Chart Data 6: Department Target vs Actual Output (Grouped Bar)
-  const deptOutputData = useMemo(() => {
-    return [
-      { dept: 'Batching', target: 240, actual: 235 },
-      { dept: 'Softener', target: 220, actual: 218 },
-      { dept: 'Carding', target: 210, actual: 205 },
-      { dept: 'Drawing', target: 200, actual: 198 },
-      { dept: 'Spinning', target: 190, actual: 186 },
-      { dept: 'S4 Loom', target: 110, actual: 108 },
-      { dept: 'Victor Loom', target: 80, actual: 78 },
-      { dept: 'Finishing', target: 100, actual: 98 }
-    ];
-  }, []);
-
-  // Chart Data 7: Moisture vs. Weight Distribution (Scatter/Histogram)
-  const moistureScatterData = useMemo(() => {
-    const list = filteredArrivals.length > 0 ? filteredArrivals : arrivals;
-    if (list && list.length > 0) {
-      const entries = list
-        .filter(item => item.moisture && !isNaN(Number(item.moisture)))
-        .map(item => ({
-          moisture: Number(Number(item.moisture).toFixed(1)),
-          weight: Number((Number(item.weight || item.weight_qtl || item.electronic_net_weight || 0)).toFixed(1)),
-          supplier: item.supplier_name || item.supplier || 'Supplier'
-        }));
-      if (entries.length > 0) return entries;
-    }
-    return [
-      { moisture: 12.5, weight: 120, supplier: 'Shree Jute' },
-      { moisture: 13.2, weight: 145, supplier: 'Bengal Fibre' },
-      { moisture: 13.8, weight: 210, supplier: 'Eastern Baling' },
-      { moisture: 14.1, weight: 195, supplier: 'Kolkata Jute' },
-      { moisture: 14.5, weight: 180, supplier: 'Green Valley' }
-    ];
-  }, [filteredArrivals, arrivals]);
-
-  // Chart Data 8: Godown Utilization Heatmap
-  const godownHeatmapData = useMemo(() => {
-    if (godowns && godowns.length > 0) {
-      return godowns.slice(0, 12).map((g: any) => ({
-        name: g.gdn_name || `GDN-${g.gdn_code}`,
-        capacity: Number(g.gdn_capacity || 450),
-        used: Math.floor(Number(g.gdn_capacity || 450) * 0.68)
-      }));
-    }
-    return [
-      { name: 'GDN 1', capacity: 600, used: 480 },
-      { name: 'GDN 3', capacity: 450, used: 390 },
-      { name: 'GDN 3A', capacity: 450, used: 310 },
-      { name: 'GDN 4', capacity: 450, used: 340 },
-      { name: 'GDN 4B', capacity: 600, used: 410 },
-      { name: 'GDN 5', capacity: 450, used: 290 },
-      { name: 'GDN 6', capacity: 450, used: 360 },
-      { name: 'GDN 7', capacity: 450, used: 320 },
-      { name: 'OUTSIDE', capacity: 500, used: 210 },
-      { name: 'MILL SHED', capacity: 450, used: 280 }
-    ];
-  }, [godowns]);
-
-  // Executive Data Matrix Rows
-  const matrixRows = useMemo(() => {
-    const list = (filteredArrivals.length > 0 ? filteredArrivals : arrivals);
-    if (list && list.length > 0) {
-      const safeStr = (v: any, fallback = '') => {
-        if (v === null || v === undefined) return fallback;
-        if (typeof v === 'object') return v.name || v.title || v.code || JSON.stringify(v);
-        return String(v);
-      };
-
-      return list.map((item, i) => {
-        const netWt = Number(item.weight || item.weight_qtl || item.electronic_net_weight || 0);
-        const rate = Number(item.rate || item.b_rate || 5850);
         return {
-          id: safeStr(item.id, `ARV-${i + 1}`),
-          chalan: safeStr(item.chalan_no || item.gate_pass, `CH-${1000 + i}`),
-          date: item.created_at ? new Date(item.created_at).toLocaleDateString() : new Date().toISOString().slice(0, 10),
-          supplier: safeStr(item.supplier_name || item.supplier, 'Supplier'),
-          broker: safeStr(item.broker_name || item.broker, 'Broker'),
-          vehicle: safeStr(item.lorry_no || item.vehicle_no, `WB-${25 + i}`),
-          grade: safeStr(item.jute_grade || item.grade, 'TD-4'),
-          grossWt: Number((netWt + 5).toFixed(2)),
-          netWt: Number(netWt.toFixed(2)),
-          moisture: item.moisture && !isNaN(Number(item.moisture)) ? String(Number(item.moisture).toFixed(1)) : '14.0',
-          totalVal: Math.round(netWt * rate),
-          status: safeStr(item.status, i % 2 === 0 ? 'Verified' : 'Inspected')
+          ...mItem,
+          matchingSaudas,
+          matchingPendingSaudas,
+          matchingPayments
         };
       });
     }
 
-    return [
-      { id: 'ARV-101', chalan: 'CH-8942', date: '2026-08-03', supplier: 'Shree Jute Traders', broker: 'S. K. Enterprises', vehicle: 'WB-25A-4819', grade: 'TD-4', grossWt: 185.5, netWt: 180.2, moisture: '14.1', totalVal: 1099220, status: 'Verified' },
-      { id: 'ARV-102', chalan: 'CH-8943', date: '2026-08-03', supplier: 'Bengal Fibre Corp', broker: 'Gupta & Sons Jute', vehicle: 'WB-19B-9021', grade: 'TD-5', grossWt: 210.0, netWt: 204.5, moisture: '13.8', totalVal: 1196325, status: 'Verified' },
-      { id: 'ARV-103', chalan: 'CH-8944', date: '2026-08-02', supplier: 'Eastern Baling Co.', broker: 'Royal Jute Agency', vehicle: 'WB-41C-3382', grade: 'TD-4', grossWt: 165.0, netWt: 160.0, moisture: '14.5', totalVal: 976000, status: 'Inspected' }
-    ];
-  }, [filteredArrivals, arrivals]);
+    return MONTH_NAMES.map((monthName, monthIndex) => {
+      // 1. Total Contract Sauda created in this month & year
+      const matchingSaudas = metrics.scpList.filter((r: any) => {
+        const y = getYearFromDate(r.date || r.po_date || r.b_date || r.created_at);
+        const m = getMonthIndexFromDate(r.date || r.po_date || r.b_date || r.created_at);
+        return y === selectedYear && m === monthIndex;
+      });
 
-  // Filtered & Searched Matrix Rows
-  const searchedMatrixRows = useMemo(() => {
-    return matrixRows.filter(row => {
-      const q = matrixSearch.toLowerCase();
+      const totalContractsCount = matchingSaudas.length;
+      let totalContractsWeightMT = 0;
+      let totalContractsValue = 0;
+
+      matchingSaudas.forEach((r: any) => {
+        const { wt, val } = getRowMetrics(r);
+        totalContractsWeightMT += wt;
+        totalContractsValue += val;
+      });
+
+      // 2. Pending Sauda for this month & year
+      const matchingPendingSaudas = matchingSaudas.filter((r: any) => {
+        const st = String(r.status || '').trim().toLowerCase();
+        const pendStr = String(r.pending ?? '').trim().toLowerCase();
+        return (
+          st === 'pending' || 
+          pendStr === 'yes' || 
+          pendStr === 'true' || 
+          r.pending === true || 
+          r.pending === 1
+        ) && (
+          st !== 'passed' && 
+          st !== 'approved' && 
+          st !== 'final' && 
+          st !== 'moved_to_final' && 
+          st !== 'completed' && 
+          st !== 'settled' && 
+          st !== 'rejected' && 
+          st !== 'cancelled'
+        );
+      });
+
+      const pendingContractsCount = matchingPendingSaudas.length;
+      let pendingContractsWeightMT = 0;
+      matchingPendingSaudas.forEach((r: any) => {
+        const { wt } = getRowMetrics(r);
+        pendingContractsWeightMT += wt;
+      });
+
+      // 3. Total Confirmed Payment by payment transaction date in this month & year
+      const matchingPayments = (paymentRecords || []).filter((p: any) => {
+        const y = getYearFromDate(p.payment_date || p.created_at);
+        const m = getMonthIndexFromDate(p.payment_date || p.created_at);
+        return y === selectedYear && m === monthIndex;
+      });
+
+      let monthlyTotalPaid = 0;
+      matchingPayments.forEach((p: any) => {
+        monthlyTotalPaid += Number(p.paid_amount || 0);
+      });
+
+      // 4. Monthly Rest Payment (Outstanding Balance for POs / Contracts due in this month)
+      let monthlyRestPayment = 0;
+      matchingPayments.forEach((p: any) => {
+        const payable = Number(p.payable_amt ?? p.total_amount ?? 0);
+        const paid = Number(p.paid_amount || 0);
+        const rest = Math.max(0, payable - paid);
+        monthlyRestPayment += rest;
+      });
+
+      return {
+        monthIndex,
+        monthName,
+        year: selectedYear,
+        totalContractsCount,
+        totalContractsWeightMT: Number(totalContractsWeightMT.toFixed(2)),
+        totalContractsValue,
+        pendingContractsCount,
+        pendingContractsWeightMT: Number(pendingContractsWeightMT.toFixed(2)),
+        monthlyTotalPaid,
+        monthlyRestPayment,
+        matchingSaudas,
+        matchingPendingSaudas,
+        matchingPayments
+      };
+    });
+  }, [metrics.scpList, paymentRecords, selectedYear, serverSummary]);
+
+  // Open drill-down modal handler
+  const openDrillDown = (
+    type: DrillDownState['type'],
+    title: string,
+    data: any[],
+    monthName?: string,
+    year?: number
+  ) => {
+    setDrillDown({
+      isOpen: true,
+      type,
+      title,
+      data,
+      monthName,
+      year: year || selectedYear
+    });
+    setDrillDownSearch('');
+    setDrillDownPage(1);
+  };
+
+  // Filtered drill-down modal records
+  const filteredDrillDownData = useMemo(() => {
+    if (!drillDown.isOpen || !drillDown.data) return [];
+    if (!drillDownSearch.trim()) return drillDown.data;
+    const term = drillDownSearch.toLowerCase().trim();
+
+    return drillDown.data.filter((item: any) => {
       return (
-        row.chalan.toLowerCase().includes(q) ||
-        row.supplier.toLowerCase().includes(q) ||
-        row.broker.toLowerCase().includes(q) ||
-        row.vehicle.toLowerCase().includes(q) ||
-        row.grade.toLowerCase().includes(q) ||
-        row.status.toLowerCase().includes(q)
+        String(item.po_no || item.ptf_no || item.voucher_no || item.sauda_no || '').toLowerCase().includes(term) ||
+        String(item.supplier || item.supplier_name || item.party_name || '').toLowerCase().includes(term) ||
+        String(item.broker || item.broker_name || '').toLowerCase().includes(term) ||
+        String(item.status || item.payment_status || item.display_status || '').toLowerCase().includes(term) ||
+        String(item.mr_no || item.arrival_no || '').toLowerCase().includes(term)
       );
     });
-  }, [matrixRows, matrixSearch]);
-
-  const paginatedMatrixRows = useMemo(() => {
-    const start = (matrixPage - 1) * rowsPerPage;
-    return searchedMatrixRows.slice(start, start + rowsPerPage);
-  }, [searchedMatrixRows, matrixPage]);
-
-  // Export CSV Handler
-  const handleExportCsv = () => {
-    const headers = ["Chalan", "Date", "Supplier", "Broker", "Vehicle", "Grade", "Gross Wt (Qtl)", "Net Wt (Qtl)", "Moisture %", "Total Value (INR)", "Status"];
-    const csvContent = [
-      headers.join(","),
-      ...searchedMatrixRows.map(r => [
-        `"${r.chalan}"`,
-        `"${r.date}"`,
-        `"${r.supplier}"`,
-        `"${r.broker}"`,
-        `"${r.vehicle}"`,
-        `"${r.grade}"`,
-        r.grossWt,
-        r.netWt,
-        `"${r.moisture}"`,
-        r.totalVal,
-        `"${r.status}"`
-      ].join(","))
-    ].join("\n");
-
-    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.setAttribute("href", url);
-    link.setAttribute("download", `Executive_BI_Matrix_${new Date().toISOString().slice(0, 10)}.csv`);
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-  };
-
-  // PDF Print Trigger
-  const handlePrintPdf = () => {
-    window.print();
-  };
+  }, [drillDown, drillDownSearch]);
 
   return (
-    <div className={cn(
-      "space-y-6 text-[#1E331B] transition-all duration-300 font-sans w-full max-w-full min-w-0",
-      isFullScreen && "fixed inset-0 z-50 bg-[#FAF7F0] p-4 sm:p-6 overflow-y-auto"
-    )}>
-
-      {/* 1. EXECUTIVE HEADER BAR */}
-      <div className="bg-gradient-to-r from-[#1E331B] via-[#2A4426] to-[#142412] text-[#FAF7F0] rounded-2xl p-2.5 sm:p-3.5 shadow-xl border border-[#2E4A2A] relative overflow-hidden w-full max-w-full min-w-0">
-        {/* Background Subtle Pattern */}
-        <div className="absolute -right-10 -bottom-10 opacity-10 pointer-events-none">
-          <BarChart3 className="w-80 h-80 text-white" />
+    <div className="space-y-5 pb-12 transition-all">
+      
+      {/* 1. TOP HEADER & BI CONTROLS BAR */}
+      <div className="bg-gradient-to-r from-[#1E331B] via-[#2E6B3E] to-[#1E331B] text-white p-4 sm:p-5 rounded-2xl shadow-md border border-[#4E9F67]/30 flex flex-wrap items-center justify-between gap-4">
+        <div className="flex items-center gap-3.5">
+          <div className="p-2.5 bg-white/10 rounded-xl border border-white/20 shadow-inner">
+            <BarChart3 className="w-6 h-6 text-[#C5A059]" />
+          </div>
+          <div>
+            <div className="flex items-center gap-2 flex-wrap">
+              <h1 className="text-base sm:text-lg font-black tracking-wide uppercase font-serif">
+                Executive BI Dashboard
+              </h1>
+              <span className="px-2 py-0.5 bg-emerald-500/20 text-emerald-300 border border-emerald-400/30 rounded-full text-[10px] font-bold flex items-center gap-1">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                Live Sync
+              </span>
+            </div>
+            <p className="text-[11px] text-[#D6CAA8] mt-0.5 flex items-center gap-2">
+              <span>Bally Jute Limited — Real-Time Database Analytics</span>
+              <span>•</span>
+              <span className="font-mono text-[10px] opacity-90">Synced: {lastSyncTime}</span>
+            </p>
+          </div>
         </div>
 
-        <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 relative z-10 w-full max-w-full min-w-0">
+        {/* Global Action Buttons */}
+        <div className="flex items-center gap-2 flex-wrap">
+          <button
+            onClick={() => setSelectedChartTab('monthly')}
+            className={cn(
+              "px-3 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer shadow-xs",
+              selectedChartTab === 'monthly'
+                ? "bg-[#C5A059] text-[#1E331B] font-extrabold shadow"
+                : "bg-white/10 hover:bg-white/20 text-white border border-white/20"
+            )}
+          >
+            <Calendar className="w-3.5 h-3.5" />
+            <span>Month-Wise Summary</span>
+          </button>
 
-          {/* Action Buttons */}
-          <div className="flex flex-wrap items-center gap-1.5 sm:gap-2 w-full max-w-full min-w-0">
-            <button
-              onClick={() => {
-                if (onNavigate) {
-                  onNavigate('reports');
-                } else if (setcurrentTab) {
-                  setcurrentTab('reports');
-                }
-              }}
-              className={cn(
-                "h-8 sm:h-9 px-2.5 sm:px-4 border-2 flex items-center gap-1.5 sm:gap-2 transition-all active:translate-x-[1px] active:translate-y-[1px] rounded-lg cursor-pointer text-[10px] sm:text-xs uppercase tracking-wider font-extrabold max-w-full truncate",
-                "bg-[#FAF7F0] border-[#D6CAA8] text-[#5A6E54] hover:bg-[#EAE2D2] hover:text-[#1E331B]"
-              )}
-            >
-              <BarChart3 className="h-3.5 w-3.5 sm:h-4 sm:w-4 text-amber-400 shrink-0" />
-              <span className="truncate">Report Dashboard</span>
-            </button>
-  
-            <button
-              onClick={() => onNavigate('admindesk')}
-              className="px-2.5 sm:px-3.5 py-1.5 sm:py-2 bg-emerald-800/60 hover:bg-emerald-700/80 border border-emerald-600/50 rounded-xl text-[10px] sm:text-xs font-bold text-white transition-all flex items-center gap-1.5 shadow-xs active:scale-95 cursor-pointer max-w-full"
-            >
-              <Lock className="h-3.5 w-3.5 sm:h-4 sm:w-4 text-[#1E331B] shrink-0" />
-              <span className="truncate">Admin Desk</span>
-            </button>
-            <button
-              onClick={onRefresh}
-              disabled={loading}
-              className="px-2.5 sm:px-3.5 py-1.5 sm:py-2 bg-emerald-800/60 hover:bg-emerald-700/80 border border-emerald-600/50 rounded-xl text-[10px] sm:text-xs font-bold text-white transition-all flex items-center gap-1.5 shadow-xs active:scale-95 cursor-pointer max-w-full"
-              title="Re-query live database"
-            >
-              <RefreshCw className={cn("w-3.5 h-3.5 shrink-0", loading && "animate-spin")} />
-              <span className="truncate">{loading ? "Syncing..." : "Refresh"}</span>
-            </button>
+          <button
+            onClick={() => {
+              onRefresh();
+              loadServerSummary(selectedYear);
+            }}
+            disabled={loading || serverLoading}
+            className="px-3 py-1.5 bg-white/10 hover:bg-white/20 border border-white/20 rounded-xl text-xs font-bold text-white transition-all flex items-center gap-1.5 shadow-xs cursor-pointer active:scale-95 disabled:opacity-50"
+            title="Refresh All Database Modules (Single-Request Server Aggregation)"
+          >
+            <RefreshCw className={cn("w-3.5 h-3.5", (loading || serverLoading) && "animate-spin text-[#C5A059]")} />
+            <span>{(loading || serverLoading) ? "Refreshing..." : "Refresh"}</span>
+          </button>
 
-            <button
-              onClick={handleExportCsv}
-              className="px-2.5 sm:px-3.5 py-1.5 sm:py-2 bg-emerald-800/80 hover:bg-emerald-700 border border-emerald-600/50 rounded-xl text-[10px] sm:text-xs font-bold text-white transition-all flex items-center gap-1.5 shadow-xs active:scale-95 cursor-pointer max-w-full"
-            >
-              <FileSpreadsheet className="w-3.5 h-3.5 shrink-0" />
-              <span className="truncate">Export CSV</span>
-            </button>
-
-            <button
-              onClick={handlePrintPdf}
-              className="px-2.5 sm:px-3.5 py-1.5 sm:py-2 bg-emerald-950 hover:bg-emerald-900 border border-emerald-700/60 rounded-xl text-[10px] sm:text-xs font-bold text-white transition-all flex items-center gap-1.5 shadow-xs active:scale-95 cursor-pointer max-w-full"
-            >
-              <Printer className="w-3.5 h-3.5 shrink-0" />
-              <span className="truncate">Print BI</span>
-            </button>
-
-            <button
-              onClick={() => setIsFullScreen(!isFullScreen)}
-              className="p-1.5 sm:p-2 bg-white/10 hover:bg-white/20 border border-white/20 rounded-xl text-white transition-all shadow-xs cursor-pointer"
-              title={isFullScreen ? "Exit Fullscreen" : "Fullscreen View"}
-            >
-              {isFullScreen ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
-            </button>
-          </div>
+          <button
+            onClick={() => window.print()}
+            className="px-3 py-1.5 bg-emerald-950 hover:bg-emerald-900 border border-emerald-700/60 rounded-xl text-xs font-bold text-white transition-all flex items-center gap-1.5 shadow-xs cursor-pointer active:scale-95"
+          >
+            <Printer className="w-3.5 h-3.5" />
+            <span>Print BI</span>
+          </button>
         </div>
       </div>
 
-      {/* 2. GLOBAL FILTERS TOOLBAR (Removed) */}
-
-      {/* 4. TOP EXECUTIVE KPI SCORECARDS GRID */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-3 xl:grid-cols-6 gap-3.5 sm:gap-4 w-full min-w-0">
+      {/* 2. TOP EXECUTIVE KPI SCORECARDS GRID */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         
-        {/* CARD 1: TOTAL SAUDA (SAUDA CHECK POINT) */}
-        {(isAdmin || hasModulePermission('po', allowedModules, isAdmin) || hasModulePermission('sauda', allowedModules, isAdmin)) && (
-          <div 
-            onClick={() => onNavigate && onNavigate('po')}
-            className="bg-white border-2 border-emerald-800/30 hover:border-emerald-700 rounded-2xl p-3.5 shadow-xs hover:shadow-md transition-all relative overflow-hidden flex flex-col justify-between cursor-pointer group active:scale-[0.99]"
-            title="Click to open Sauda Check Point / Purchase Order"
-          >
-            <div>
-              <div className="flex items-center justify-between gap-1 mb-1.5">
-                <span className="text-[11px] font-bold uppercase text-[#1E331B] tracking-wider flex items-center gap-1">
-                  <span>📦</span> Sauda Check Point
-                </span>
-                <div className="p-1.5 rounded-xl bg-emerald-100/80 text-emerald-900 border border-emerald-300 group-hover:bg-emerald-200 transition-colors">
-                  <Package className="w-3.5 h-3.5 text-emerald-800" />
-                </div>
+        {/* CARD 1: SAUDA CHECK POINT */}
+        <div 
+          onClick={() => openDrillDown('sauda', 'Sauda Check Point Contracts', metrics.scpList)}
+          className="bg-white border-2 border-emerald-800/30 hover:border-emerald-700 rounded-2xl p-4 shadow-xs hover:shadow-md transition-all relative overflow-hidden flex flex-col justify-between cursor-pointer group active:scale-[0.99]"
+          title="Click to view full Sauda Check Point records"
+        >
+          <div>
+            <div className="flex items-center justify-between gap-1 mb-2">
+              <span className="text-[11px] font-bold uppercase text-[#1E331B] tracking-wider flex items-center gap-1.5">
+                <span>📦</span> Sauda Check Point
+              </span>
+              <div className="p-1.5 rounded-xl bg-emerald-100/80 text-emerald-900 border border-emerald-300 group-hover:bg-emerald-200 transition-colors">
+                <Package className="w-4 h-4 text-emerald-800" />
               </div>
+            </div>
 
-              {/* Sub-view switcher: TOTAL / SAUDA / P.T.F */}
-              <div className="flex items-center gap-1 bg-[#F4F0E4] p-0.5 rounded-lg mb-2 text-[10px] font-bold" onClick={(e) => e.stopPropagation()}>
-                <button
-                  type="button"
-                  onClick={() => setSaudaViewMode('all')}
-                  className={cn(
-                    "flex-1 py-0.5 rounded text-center transition-all cursor-pointer",
-                    saudaViewMode === 'all' ? "bg-[#1E331B] text-white shadow-xs" : "text-[#556952] hover:text-[#1E331B]"
-                  )}
-                >
-                  TOTAL
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setSaudaViewMode('sauda')}
-                  className={cn(
-                    "flex-1 py-0.5 rounded text-center transition-all cursor-pointer",
-                    saudaViewMode === 'sauda' ? "bg-[#2E6B3E] text-white shadow-xs" : "text-[#556952] hover:text-[#1E331B]"
-                  )}
-                >
-                  SAUDA
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setSaudaViewMode('ptf')}
-                  className={cn(
-                    "flex-1 py-0.5 rounded text-center transition-all cursor-pointer",
-                    saudaViewMode === 'ptf' ? "bg-amber-800 text-white shadow-xs" : "text-[#556952] hover:text-[#1E331B]"
-                  )}
-                >
-                  P.T.F
-                </button>
+            {/* Sub-view switcher: TOTAL / SAUDA / P.T.F */}
+            <div className="flex items-center gap-1 bg-[#F4F0E4] p-0.5 rounded-lg mb-2.5 text-[10px] font-bold" onClick={(e) => e.stopPropagation()}>
+              <button
+                type="button"
+                onClick={() => setSaudaViewMode('all')}
+                className={cn(
+                  "flex-1 py-1 rounded text-center transition-all cursor-pointer",
+                  saudaViewMode === 'all' ? "bg-[#1E331B] text-white shadow-xs" : "text-[#556952] hover:text-[#1E331B]"
+                )}
+              >
+                TOTAL
+              </button>
+              <button
+                type="button"
+                onClick={() => setSaudaViewMode('sauda')}
+                className={cn(
+                  "flex-1 py-1 rounded text-center transition-all cursor-pointer",
+                  saudaViewMode === 'sauda' ? "bg-[#2E6B3E] text-white shadow-xs" : "text-[#556952] hover:text-[#1E331B]"
+                )}
+              >
+                SAUDA
+              </button>
+              <button
+                type="button"
+                onClick={() => setSaudaViewMode('ptf')}
+                className={cn(
+                  "flex-1 py-1 rounded text-center transition-all cursor-pointer",
+                  saudaViewMode === 'ptf' ? "bg-amber-800 text-white shadow-xs" : "text-[#556952] hover:text-[#1E331B]"
+                )}
+              >
+                P.T.F
+              </button>
+            </div>
+
+            <div className="my-1.5">
+              <div className="text-2xl font-numeric font-extrabold text-[#1E331B] tracking-tight">
+                {(saudaViewMode === 'ptf' 
+                  ? metrics.scpBreakup.ptf.weightMT 
+                  : saudaViewMode === 'sauda' 
+                    ? metrics.scpBreakup.sauda.weightMT 
+                    : metrics.scpTotalWeightMT
+                ).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} <span className="text-xs font-sans font-semibold text-[#556952]">MT</span>
               </div>
-
-              <div className="my-1.5">
-                <div className="text-2xl font-numeric font-extrabold text-[#1E331B] tracking-tight">
-                  {(saudaViewMode === 'ptf' 
-                    ? metrics.scpBreakup.ptf.weightMT 
+              <div className="text-[11px] text-[#2E6B3E] font-bold mt-0.5 font-numeric flex items-center justify-between">
+                <span>
+                  ₹ {(saudaViewMode === 'ptf' 
+                    ? metrics.scpBreakup.ptf.valueLakhs 
                     : saudaViewMode === 'sauda' 
-                      ? metrics.scpBreakup.sauda.weightMT 
-                      : metrics.scpBreakup.total.weightMT
-                  ).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                </div>
-                <div className="text-[11px] text-[#2E6B3E] font-bold mt-0.5 font-numeric flex items-center justify-between">
-                  <span>
-                    ₹ {(saudaViewMode === 'ptf' 
-                      ? metrics.scpBreakup.ptf.valueLakhs 
-                      : saudaViewMode === 'sauda' 
-                        ? metrics.scpBreakup.sauda.valueLakhs 
-                        : metrics.scpBreakup.total.valueLakhs
-                    ).toLocaleString('en-IN')} Lakhs
-                  </span>
-                  <span className="text-[10px] text-[#556952]">
-                    {(saudaViewMode === 'ptf' 
-                      ? metrics.scpBreakup.ptf.count 
-                      : saudaViewMode === 'sauda' 
-                        ? metrics.scpBreakup.sauda.count 
-                        : metrics.scpBreakup.total.count
-                    )} Contracts
-                  </span>
-                </div>
-              </div>
-
-              {/* Sum Breakup: P.T.F & Sauda & Total */}
-              <div className="pt-2 border-t border-[#F2EDE0] space-y-1 text-[10px]" onClick={(e) => e.stopPropagation()}>
-                <div className="flex items-center justify-between text-[#1E331B]">
-                  <span className="font-bold flex items-center gap-1">
-                    <span className="w-1.5 h-1.5 rounded-full bg-amber-600"></span>
-                    P.T.F:
-                  </span>
-                  <span className="font-extrabold font-numeric text-amber-900">
-                    {metrics.scpBreakup.ptf.weightMT.toLocaleString('en-IN', { minimumFractionDigits: 2 })} <span className="font-normal text-[#556952]">({metrics.scpBreakup.ptf.count} Cont.)</span>
-                  </span>
-                </div>
-                <div className="flex items-center justify-between text-[#1E331B]">
-                  <span className="font-bold flex items-center gap-1">
-                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-600"></span>
-                    Sauda:
-                  </span>
-                  <span className="font-extrabold font-numeric text-[#2E6B3E]">
-                    {metrics.scpBreakup.sauda.weightMT.toLocaleString('en-IN', { minimumFractionDigits: 2 })} <span className="font-normal text-[#556952]">({metrics.scpBreakup.sauda.count} Cont.)</span>
-                  </span>
-                </div>
-                <div className="flex items-center justify-between text-[#1E331B] pt-0.5 border-t border-dashed border-[#E5DEC9]">
-                  <span className="font-extrabold">Total:</span>
-                  <span className="font-extrabold font-numeric text-[#1E331B]">
-                    {metrics.scpBreakup.total.weightMT.toLocaleString('en-IN', { minimumFractionDigits: 2 })} <span className="font-normal text-[#556952]">({metrics.scpBreakup.total.count} Total)</span>
-                  </span>
-                </div>
-              </div>
-            </div>
-
-            <div className="mt-2 pt-1 border-t border-dashed border-[#E5DEC9] text-[10px] font-bold text-[#2E6B3E] flex items-center justify-between group-hover:translate-x-0.5 transition-transform">
-              <span>Open Sauda Check Point</span>
-              <span className="text-xs font-bold">→</span>
-            </div>
-          </div>
-        )}
-
-        {/* CARD 2: PENDING SAUDA */}
-        {(isAdmin || hasModulePermission('sauda', allowedModules, isAdmin) || hasModulePermission('sms_sauda', allowedModules, isAdmin) || hasModulePermission('po', allowedModules, isAdmin)) && (
-          <div 
-            onClick={() => onNavigate && onNavigate('po')}
-            className="bg-white border-2 border-emerald-800/30 hover:border-emerald-700 rounded-2xl p-3.5 shadow-xs hover:shadow-md transition-all relative overflow-hidden flex flex-col justify-between cursor-pointer group active:scale-[0.99]"
-            title="Click to view Pending Saudas in Check Point"
-          >
-            <div>
-              <div className="flex items-center justify-between gap-1 mb-1.5">
-                <span className="text-[11px] font-bold uppercase text-[#1E331B] tracking-wider flex items-center gap-1">
-                  <span>⏳</span> Pending Sauda
+                      ? metrics.scpBreakup.sauda.valueLakhs 
+                      : metrics.scpTotalValueLakhs
+                  ).toLocaleString('en-IN')} Lakhs
                 </span>
-                <div className="p-1.5 rounded-xl bg-emerald-100/80 text-emerald-900 border border-emerald-300 group-hover:bg-emerald-200 transition-colors">
-                  <Clock className="w-3.5 h-3.5 text-emerald-800" />
-                </div>
-              </div>
-
-              {/* Sub-view switcher: TOTAL / SAUDA / P.T.F */}
-              <div className="flex items-center gap-1 bg-[#F4F0E4] p-0.5 rounded-lg mb-2 text-[10px] font-bold" onClick={(e) => e.stopPropagation()}>
-                <button
-                  type="button"
-                  onClick={() => setPendingSaudaViewMode('all')}
-                  className={cn(
-                    "flex-1 py-0.5 rounded text-center transition-all cursor-pointer",
-                    pendingSaudaViewMode === 'all' ? "bg-[#1E331B] text-white shadow-xs" : "text-[#556952] hover:text-[#1E331B]"
-                  )}
-                >
-                  TOTAL
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setPendingSaudaViewMode('sauda')}
-                  className={cn(
-                    "flex-1 py-0.5 rounded text-center transition-all cursor-pointer",
-                    pendingSaudaViewMode === 'sauda' ? "bg-[#2E6B3E] text-white shadow-xs" : "text-[#556952] hover:text-[#1E331B]"
-                  )}
-                >
-                  SAUDA
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setPendingSaudaViewMode('ptf')}
-                  className={cn(
-                    "flex-1 py-0.5 rounded text-center transition-all cursor-pointer",
-                    pendingSaudaViewMode === 'ptf' ? "bg-amber-800 text-white shadow-xs" : "text-[#556952] hover:text-[#1E331B]"
-                  )}
-                >
-                  P.T.F
-                </button>
-              </div>
-
-              <div className="my-1.5">
-                <div className="text-2xl font-numeric font-extrabold text-[#1E331B] tracking-tight">
-                  {(pendingSaudaViewMode === 'ptf' 
-                    ? metrics.scpBreakup.ptf.pendingWeightMT 
-                    : pendingSaudaViewMode === 'sauda' 
-                      ? metrics.scpBreakup.sauda.pendingWeightMT 
-                      : metrics.scpBreakup.total.pendingWeightMT
-                  ).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                </div>
-                <div className="text-[11px] text-amber-800 font-bold mt-0.5 font-numeric flex items-center justify-between">
-                  <span>
-                    ₹ {(pendingSaudaViewMode === 'ptf' 
-                      ? metrics.scpBreakup.ptf.pendingValueLakhs 
-                      : pendingSaudaViewMode === 'sauda' 
-                        ? metrics.scpBreakup.sauda.pendingValueLakhs 
-                        : metrics.scpBreakup.total.pendingValueLakhs
-                    ).toLocaleString('en-IN')} L
-                  </span>
-                  <span className="text-[10px] text-[#556952]">
-                    {(pendingSaudaViewMode === 'ptf' 
-                      ? metrics.scpBreakup.ptf.pendingCount 
-                      : pendingSaudaViewMode === 'sauda' 
-                        ? metrics.scpBreakup.sauda.pendingCount 
-                        : metrics.scpBreakup.total.pendingCount
-                    )} Pending
-                  </span>
-                </div>
-              </div>
-
-              {/* Sum Breakup: P.T.F & Sauda & Total */}
-              <div className="pt-2 border-t border-[#F2EDE0] space-y-1 text-[10px]" onClick={(e) => e.stopPropagation()}>
-                <div className="flex items-center justify-between text-[#1E331B]">
-                  <span className="font-bold flex items-center gap-1">
-                    <span className="w-1.5 h-1.5 rounded-full bg-amber-600"></span>
-                    P.T.F:
-                  </span>
-                  <span className="font-extrabold font-numeric text-amber-900">
-                    {metrics.scpBreakup.ptf.pendingWeightMT.toLocaleString('en-IN', { minimumFractionDigits: 2 })} <span className="font-normal text-[#556952]">({metrics.scpBreakup.ptf.pendingCount} Pend.)</span>
-                  </span>
-                </div>
-                <div className="flex items-center justify-between text-[#1E331B]">
-                  <span className="font-bold flex items-center gap-1">
-                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-600"></span>
-                    Sauda:
-                  </span>
-                  <span className="font-extrabold font-numeric text-[#2E6B3E]">
-                    {metrics.scpBreakup.sauda.pendingWeightMT.toLocaleString('en-IN', { minimumFractionDigits: 2 })} <span className="font-normal text-[#556952]">({metrics.scpBreakup.sauda.pendingCount} Pend.)</span>
-                  </span>
-                </div>
-                <div className="flex items-center justify-between text-[#1E331B] pt-0.5 border-t border-dashed border-[#E5DEC9]">
-                  <span className="font-extrabold">Total:</span>
-                  <span className="font-extrabold font-numeric text-[#1E331B]">
-                    {metrics.scpBreakup.total.pendingWeightMT.toLocaleString('en-IN', { minimumFractionDigits: 2 })} <span className="font-normal text-[#556952]">({metrics.scpBreakup.total.pendingCount} Total)</span>
-                  </span>
-                </div>
+                <span className="text-[10px] text-[#556952]">
+                  {(saudaViewMode === 'ptf' 
+                    ? metrics.scpBreakup.ptf.count 
+                    : saudaViewMode === 'sauda' 
+                      ? metrics.scpBreakup.sauda.count 
+                      : metrics.scpTotalCount
+                  )} Contracts
+                </span>
               </div>
             </div>
 
-            <div className="mt-2 pt-1 border-t border-dashed border-[#E5DEC9] text-[10px] font-bold text-[#2E6B3E] flex items-center justify-between group-hover:translate-x-0.5 transition-transform">
-              <span>View Pending Sauda</span>
-              <span className="text-xs font-bold">→</span>
+            {/* Sub-status Mix */}
+            <div className="pt-2.5 border-t border-[#F2EDE0] text-[10px] space-y-1">
+              <div className="flex items-center justify-between">
+                <span className="text-amber-800 font-bold flex items-center gap-1">
+                  <Clock className="w-3 h-3" /> Pending Sauda:
+                </span>
+                <span className="font-bold text-amber-900 font-numeric">
+                  {metrics.scpPendingCount} ({metrics.scpPendingWeightMT} MT)
+                </span>
+              </div>
+              <div className="flex items-center justify-between text-[#556952]">
+                <span>Passed / Approved:</span>
+                <span className="font-bold font-numeric text-emerald-800">{metrics.scpPassedCount} Contracts</span>
+              </div>
             </div>
           </div>
-        )}
+
+          <div className="mt-3 pt-1.5 border-t border-dashed border-[#E5DEC9] text-[10px] font-bold text-[#2E6B3E] flex items-center justify-between group-hover:translate-x-0.5 transition-transform">
+            <span>View Sauda Check Point</span>
+            <span className="text-xs font-bold">→</span>
+          </div>
+        </div>
+
+        {/* CARD 2: TOTAL GENERATED P.O. */}
+        <div 
+          onClick={() => openDrillDown('po', 'Total Generated Purchase Orders', metrics.combinedUniquePos)}
+          className="bg-white border-2 border-indigo-800/30 hover:border-indigo-700 rounded-2xl p-4 shadow-xs hover:shadow-md transition-all relative overflow-hidden flex flex-col justify-between cursor-pointer group active:scale-[0.99]"
+          title="Click to view all Generated P.O.s"
+        >
+          <div>
+            <div className="flex items-center justify-between gap-1 mb-2">
+              <span className="text-[11px] font-bold uppercase text-indigo-950 tracking-wider flex items-center gap-1.5">
+                <span>📋</span> Total Generated P.O.
+              </span>
+              <div className="p-1.5 rounded-xl bg-indigo-100 text-indigo-900 border border-indigo-300 group-hover:bg-indigo-200 transition-colors">
+                <FileCheck className="w-4 h-4 text-indigo-800" />
+              </div>
+            </div>
+
+            <div className="my-2.5">
+              <div className="text-2xl font-numeric font-extrabold text-indigo-950 tracking-tight">
+                {metrics.totalGeneratedPoCount} <span className="text-xs font-sans font-semibold text-indigo-700">POs</span>
+              </div>
+              <div className="text-[11px] text-indigo-800 font-bold mt-0.5 font-numeric flex items-center justify-between">
+                <span>{metrics.totalGeneratedPoWeightMT.toLocaleString('en-IN')} MT Total Wt</span>
+                <span className="text-[10px] text-indigo-600">Unique Deduplicated</span>
+              </div>
+            </div>
+
+            {/* Status Breakdown */}
+            <div className="pt-2.5 border-t border-indigo-100 text-[10px] space-y-1">
+              <div className="flex items-center justify-between">
+                <span className="text-amber-800 font-bold flex items-center gap-1">
+                  <span className="w-1.5 h-1.5 rounded-full bg-amber-500" /> Pending P.O:
+                </span>
+                <span className="font-bold text-amber-900 font-numeric">{metrics.totalGeneratedPoPendingCount} Active</span>
+              </div>
+              <div className="flex items-center justify-between text-emerald-800">
+                <span className="font-bold flex items-center gap-1">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" /> Completed P.O:
+                </span>
+                <span className="font-bold font-numeric">{metrics.totalGeneratedPoCompletedCount} Cleared</span>
+              </div>
+            </div>
+          </div>
+
+          <div className="mt-3 pt-1.5 border-t border-dashed border-indigo-200 text-[10px] font-bold text-indigo-800 flex items-center justify-between group-hover:translate-x-0.5 transition-transform">
+            <span>View All Generated P.O.s</span>
+            <span className="text-xs font-bold">→</span>
+          </div>
+        </div>
 
         {/* CARD 3: TOTAL PAYMENT */}
-        {(isAdmin || hasModulePermission('payment', allowedModules, isAdmin)) && (
-          <div 
-            onClick={() => onNavigate && onNavigate('payment')}
-            className="bg-white border-2 border-emerald-800/30 hover:border-emerald-700 rounded-2xl p-4 shadow-xs hover:shadow-md transition-all relative overflow-hidden flex flex-col justify-between cursor-pointer group active:scale-[0.99]"
-            title="Click to open Payment Module (Payable Net Amount)"
-          >
-            <div className="flex items-center justify-between">
+        <div 
+          onClick={() => openDrillDown('payment', 'Payment Operations Records', paymentRecords)}
+          className="bg-white border-2 border-emerald-800/30 hover:border-emerald-700 rounded-2xl p-4 shadow-xs hover:shadow-md transition-all relative overflow-hidden flex flex-col justify-between cursor-pointer group active:scale-[0.99]"
+          title="Click to view Payment Module breakdown"
+        >
+          <div>
+            <div className="flex items-center justify-between gap-1 mb-2">
               <span className="text-[11px] font-bold uppercase text-[#1E331B] tracking-wider flex items-center gap-1.5">
                 <span>💳</span> Total Payment
               </span>
-              <div className="p-2 rounded-xl bg-emerald-100/80 text-emerald-900 border border-emerald-300 group-hover:bg-emerald-200 transition-colors">
+              <div className="p-1.5 rounded-xl bg-emerald-100/80 text-emerald-900 border border-emerald-300 group-hover:bg-emerald-200 transition-colors">
                 <Coins className="w-4 h-4 text-emerald-800" />
               </div>
             </div>
 
-            <div className="my-2.5">
+            <div className="my-2">
               <div className="text-2xl font-numeric font-extrabold text-[#1E331B] tracking-tight">
-                ₹ {metrics.totalPaymentLakhs.toLocaleString('en-IN', { minimumFractionDigits: 2 })} <span className="text-xs font-sans font-semibold text-[#556952]">Lakhs</span>
+                ₹ {metrics.totalPaymentPaidLakhs.toLocaleString('en-IN', { minimumFractionDigits: 2 })} <span className="text-xs font-sans font-semibold text-[#556952]">Lakhs</span>
               </div>
-              <div className="text-[11px] text-[#2E6B3E] font-bold mt-0.5">
-                Payable Net Amount (₹)
+              <div className="text-[11px] text-[#2E6B3E] font-bold mt-0.5 font-numeric flex items-center justify-between">
+                <span>Total Confirmed Paid</span>
+                <span className="text-[10px] text-[#556952]">{metrics.clearedVouchersCount} Cleared</span>
               </div>
             </div>
 
-            <div className="pt-2 border-t border-[#F2EDE0] text-[10px] space-y-1">
+            {/* Financial Details */}
+            <div className="pt-2.5 border-t border-[#F2EDE0] text-[10px] space-y-1">
               <div className="flex items-center justify-between">
-                <span className="text-[#1E331B] font-bold">Payment Records</span>
-                <span className="text-[#2E6B3E] font-bold font-numeric">{metrics.totalPaymentCount} Vouchers</span>
+                <span className="text-[#1E331B] font-bold">Payable Net Value:</span>
+                <span className="font-bold text-[#2E6B3E] font-numeric">₹ {metrics.totalPaymentPayableLakhs.toLocaleString('en-IN')} L</span>
               </div>
-            </div>
-
-            <div className="mt-2 pt-1 border-t border-dashed border-[#E5DEC9] text-[10px] font-bold text-[#2E6B3E] flex items-center justify-between group-hover:translate-x-0.5 transition-transform">
-              <span>Open Payment Module</span>
-              <span className="text-xs font-bold">→</span>
+              <div className="flex items-center justify-between">
+                <span className="text-rose-800 font-bold">Outstanding Rest:</span>
+                <span className="font-bold text-rose-800 font-numeric">₹ {metrics.outstandingRestPaymentLakhs.toLocaleString('en-IN')} L ({metrics.pendingVouchersCount} Due)</span>
+              </div>
             </div>
           </div>
-        )}
 
-        {/* CARD 4: ADVANCE PAYMENT (PAID AMOUNT) */}
-        {(isAdmin || hasModulePermission('payment', allowedModules, isAdmin)) && (
-          <div 
-            onClick={() => onNavigate && onNavigate('payment')}
-            className="bg-white border-2 border-emerald-800/30 hover:border-emerald-700 rounded-2xl p-4 shadow-xs hover:shadow-md transition-all relative overflow-hidden flex flex-col justify-between cursor-pointer group active:scale-[0.99]"
-            title="Click to view Paid Amount (Advance / Disbursed)"
-          >
-            <div className="flex items-center justify-between">
-              <span className="text-[11px] font-bold uppercase text-[#1E331B] tracking-wider flex items-center gap-1.5">
-                <span>💸</span> Advance Payment
-              </span>
-              <div className="p-2 rounded-xl bg-emerald-100/80 text-emerald-900 border border-emerald-300 group-hover:bg-emerald-200 transition-colors">
-                <Wallet className="w-4 h-4 text-emerald-800" />
-              </div>
-            </div>
-
-            <div className="my-2.5">
-              <div className="text-2xl font-numeric font-extrabold text-[#1E331B] tracking-tight">
-                ₹ {metrics.advancePaymentLakhs.toLocaleString('en-IN', { minimumFractionDigits: 2 })} <span className="text-xs font-sans font-semibold text-[#556952]">Lakhs</span>
-              </div>
-              <div className="text-[11px] text-[#2E6B3E] font-bold mt-0.5">
-                Paid Amount (₹)
-              </div>
-            </div>
-
-            <div className="pt-2 border-t border-[#F2EDE0] text-[10px] space-y-1">
-              <div className="flex items-center justify-between">
-                <span className="text-[#1E331B] font-bold">Adjusted / Paid</span>
-                <span className="text-[#2E6B3E] font-bold font-numeric">{metrics.paidVouchersCount} Vouchers</span>
-              </div>
-            </div>
-
-            <div className="mt-2 pt-1 border-t border-dashed border-[#E5DEC9] text-[10px] font-bold text-[#2E6B3E] flex items-center justify-between group-hover:translate-x-0.5 transition-transform">
-              <span>View Advance Vouchers</span>
-              <span className="text-xs font-bold">→</span>
-            </div>
+          <div className="mt-3 pt-1.5 border-t border-dashed border-[#E5DEC9] text-[10px] font-bold text-[#2E6B3E] flex items-center justify-between group-hover:translate-x-0.5 transition-transform">
+            <span>View Payment Operations</span>
+            <span className="text-xs font-bold">→</span>
           </div>
-        )}
+        </div>
 
-        {/* CARD 5: REST PAYMENT (PENDING AMOUNT) */}
-        {(isAdmin || hasModulePermission('payment', allowedModules, isAdmin)) && (
-          <div 
-            onClick={() => onNavigate && onNavigate('payment')}
-            className="bg-white border-2 border-emerald-800/30 hover:border-emerald-700 rounded-2xl p-4 shadow-xs hover:shadow-md transition-all relative overflow-hidden flex flex-col justify-between cursor-pointer group active:scale-[0.99]"
-            title="Click to view Pending Amount Balance"
-          >
-            <div className="flex items-center justify-between">
-              <span className="text-[11px] font-bold uppercase text-[#1E331B] tracking-wider flex items-center gap-1.5">
-                <span>⚖️</span> Rest Payment
-              </span>
-              <div className="p-2 rounded-xl bg-emerald-100/80 text-emerald-900 border border-emerald-300 group-hover:bg-emerald-200 transition-colors">
-                <Scale className="w-4 h-4 text-emerald-800" />
-              </div>
-            </div>
-
-            <div className="my-2.5">
-              <div className="text-2xl font-numeric font-extrabold text-[#1E331B] tracking-tight">
-                ₹ {metrics.restPaymentLakhs.toLocaleString('en-IN', { minimumFractionDigits: 2 })} <span className="text-xs font-sans font-semibold text-[#556952]">Lakhs</span>
-              </div>
-              <div className="text-[11px] text-rose-800 font-bold mt-0.5">
-                Pending Amount (₹)
-              </div>
-            </div>
-
-            <div className="pt-2 border-t border-[#F2EDE0] text-[10px] space-y-1">
-              <div className="flex items-center justify-between">
-                <span className="text-[#1E331B] font-bold">Net Due Payment</span>
-                <span className="text-rose-800 font-bold font-numeric">{metrics.pendingVouchersCount} Pending</span>
-              </div>
-            </div>
-
-            <div className="mt-2 pt-1 border-t border-dashed border-[#E5DEC9] text-[10px] font-bold text-[#2E6B3E] flex items-center justify-between group-hover:translate-x-0.5 transition-transform">
-              <span>View Outstanding Dues</span>
-              <span className="text-xs font-bold">→</span>
-            </div>
-          </div>
-        )}
-
-        {/* CARD 6: GODOWN STOCK (FROM STOCK INVENTORY: CURRENT STOCK BALANCE & WEIGHT) */}
-        {(isAdmin || hasModulePermission('closing_stock', allowedModules, isAdmin) || hasModulePermission('bardana', allowedModules, isAdmin) || hasModulePermission('issue', allowedModules, isAdmin)) && (
-          <div 
-            onClick={() => onNavigate && onNavigate('stock')}
-            className="bg-white border-2 border-emerald-800/30 hover:border-emerald-700 rounded-2xl p-4 shadow-xs hover:shadow-md transition-all relative overflow-hidden flex flex-col justify-between cursor-pointer group active:scale-[0.99]"
-            title="Click to open Stock Inventory (Current Stock Balance & Weight)"
-          >
-            <div className="flex items-center justify-between">
-              <span className="text-[11px] font-bold uppercase text-[#1E331B] tracking-wider flex items-center gap-1.5">
+        {/* CARD 4: GODOWN STOCK */}
+        <div 
+          onClick={() => onNavigate && onNavigate('stock')}
+          className="bg-white border-2 border-slate-700/30 hover:border-slate-800 rounded-2xl p-4 shadow-xs hover:shadow-md transition-all relative overflow-hidden flex flex-col justify-between cursor-pointer group active:scale-[0.99]"
+          title="Click to view Stock Inventory"
+        >
+          <div>
+            <div className="flex items-center justify-between gap-1 mb-2">
+              <span className="text-[11px] font-bold uppercase text-slate-900 tracking-wider flex items-center gap-1.5">
                 <span>🏢</span> Godown Stock
               </span>
-              <div className="p-2 rounded-xl bg-emerald-100/80 text-emerald-900 border border-emerald-300 group-hover:bg-emerald-200 transition-colors">
-                <Warehouse className="w-4 h-4 text-emerald-800" />
-              </div>
-            </div>
-
-            <div className="my-2.5">
-              <div className="text-2xl font-numeric font-extrabold text-[#1E331B] tracking-tight">
-                {metrics.totalStockMt.toLocaleString('en-IN', { minimumFractionDigits: 3, maximumFractionDigits: 3 })}
-              </div>
-              <div className="text-[11px] text-[#2E6B3E] font-bold mt-0.5 font-numeric">
-                {metrics.godownStockBales.toLocaleString('en-IN')} Bales
-              </div>
-            </div>
-
-            <div className="pt-2 border-t border-[#F2EDE0] text-[10px] space-y-1">
-              <div className="flex items-center justify-between">
-                <span className="text-[#1E331B] font-bold">Current Stock Balance</span>
-                <span className="text-[#2E6B3E] font-bold font-numeric">{metrics.godownStockBales.toLocaleString('en-IN')} Bales</span>
-              </div>
-            </div>
-
-            <div className="mt-2 pt-1 border-t border-dashed border-[#E5DEC9] text-[10px] font-bold text-[#2E6B3E] flex items-center justify-between group-hover:translate-x-0.5 transition-transform">
-              <span>Open Stock Inventory</span>
-              <span className="text-xs font-bold">→</span>
-            </div>
-          </div>
-        )}
-
-      </div>
-
-      {/* 5. POWER BI ANALYTICAL VISUALS GRID */}
-      {/* Row 1: Supplier Market Share Donut + Broker Performance Bar */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-        {/* Visual 4: Broker Performance Horizontal Bar Chart */}
-        <div className="lg:col-span-7 bg-white border border-[#E5DEC9] rounded-2xl p-5 shadow-xs">
-          <div className="flex items-center justify-between mb-4 border-b border-[#F2EDE0] pb-3">
-            <div>
-              <h3 className="text-sm font-bold uppercase tracking-wider text-[#1E331B] font-mono flex items-center gap-2">
-                <ShieldCheck className="w-4 h-4 text-emerald-700" />
-                Broker Tonnage & Fulfillment Scorecard
-              </h3>
-              <p className="text-[11px] text-[#556952] mt-0.5">Ranked by contract completion rate and quality compliance</p>
-            </div>
-            <span className="text-[10px] bg-purple-50 text-purple-800 border border-purple-200 px-2.5 py-1 rounded-lg font-mono font-bold">
-              Ranked Bar
-            </span>
-          </div>
-
-          <div className="h-64 w-full">
-            <ResponsiveContainer width="100%" height="100%" minWidth={100} minHeight={100}>
-              <BarChart data={brokerPerformanceData} margin={{ top: 10, right: 10, left: 20, bottom: 0 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#F2EDE0" />
-                <XAxis dataKey="name" tick={{ fontSize: 10, fill: '#556952' }} />
-                <YAxis tick={{ fontSize: 10, fill: '#556952' }} />
-                <Tooltip contentStyle={{ backgroundColor: '#FAF7F0', borderColor: '#D6CAA8', borderRadius: '12px', fontSize: '11px' }} />
-                <Legend wrapperStyle={{ fontSize: '11px', paddingTop: '10px' }} />
-                <Bar dataKey="tonnageMT" name="Tonnage (MT)" fill="#1F4D2B" radius={[6, 6, 0, 0]} />
-                <Bar dataKey="fulfillment" name="Fulfillment %" fill="#C5A059" radius={[6, 6, 0, 0]} />
-              </BarChart>
-            </ResponsiveContainer>
-          </div>
-        </div>
-        {/* Visual 3: Supplier Market Share Donut Chart */}
-        <div className="lg:col-span-5 bg-white border border-[#E5DEC9] rounded-2xl p-5 shadow-xs">
-          <div className="flex items-center justify-between mb-4 border-b border-[#F2EDE0] pb-3">
-            <div>
-              <h3 className="text-sm font-bold uppercase tracking-wider text-[#1E331B] font-mono flex items-center gap-2">
-                <Users className="w-4 h-4 text-emerald-700" />
-                Supplier Procurement Share (%)
-              </h3>
-              <p className="text-[11px] text-[#556952] mt-0.5">Top suppliers by total volume contribution</p>
-            </div>
-            <span className="text-[10px] bg-blue-50 text-blue-800 border border-blue-200 px-2.5 py-1 rounded-lg font-mono font-bold">
-              Donut Chart
-            </span>
-          </div>
-
-          <div className="h-64 w-full flex items-center justify-center">
-            <ResponsiveContainer width="100%" height="100%" minWidth={100} minHeight={100}>
-              <PieChart>
-                <Pie
-                  data={supplierShareData}
-                  cx="50%"
-                  cy="50%"
-                  innerRadius={55}
-                  outerRadius={90}
-                  paddingAngle={4}
-                  dataKey="value"
-                  label={({ name, percent }: any) => `${name.split(' ')[0]} ${(percent * 100).toFixed(0)}%`}
-                >
-                  {supplierShareData.map((entry, index) => (
-                    <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
-                  ))}
-                </Pie>
-                <Tooltip contentStyle={{ backgroundColor: '#FAF7F0', borderColor: '#D6CAA8', borderRadius: '12px', fontSize: '11px' }} />
-              </PieChart>
-            </ResponsiveContainer>
-          </div>
-        </div>
-      </div>
-      {/* Row 2: Purchase Tonnage & Cost Trend + Quality Grade Composition */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-        {/* Visual 1: Purchase Tonnage & Cost Area Chart */}
-        <div className="lg:col-span-7 bg-white border border-[#E5DEC9] rounded-2xl p-5 shadow-xs">
-          <div className="flex items-center justify-between mb-4 border-b border-[#F2EDE0] pb-3">
-            <div>
-              <h3 className="text-sm font-bold uppercase tracking-wider text-[#1E331B] font-mono flex items-center gap-2">
-                <TrendingUp className="w-4 h-4 text-emerald-700" />
-                Purchase Tonnage & Spend Trend (Daily MT & ₹ Lakhs)
-              </h3>
-              <p className="text-[11px] text-[#556952] mt-0.5">
-                Comparing current period arrivals tonnage (MT) against spend value
-              </p>
-            </div>
-            <span className="text-[10px] bg-emerald-50 text-emerald-800 border border-emerald-200 px-2.5 py-1 rounded-lg font-mono font-bold">
-              Area & Spline
-            </span>
-          </div>
-
-          <div className="h-72 w-full">
-            <ResponsiveContainer width="100%" height="100%" minWidth={100} minHeight={100}>
-              <AreaChart data={purchaseTrendData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
-                <defs>
-                  <linearGradient id="tonnageGrad" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="#1F4D2B" stopOpacity={0.4}/>
-                    <stop offset="95%" stopColor="#1F4D2B" stopOpacity={0.0}/>
-                  </linearGradient>
-                  <linearGradient id="costGrad" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="#C5A059" stopOpacity={0.4}/>
-                    <stop offset="95%" stopColor="#C5A059" stopOpacity={0.0}/>
-                  </linearGradient>
-                </defs>
-                <CartesianGrid strokeDasharray="3 3" stroke="#F2EDE0" />
-                <XAxis dataKey="period" tick={{ fontSize: 10, fill: '#556952' }} />
-                <YAxis tick={{ fontSize: 10, fill: '#556952' }} />
-                <Tooltip 
-                  contentStyle={{ backgroundColor: '#FAF7F0', borderColor: '#D6CAA8', borderRadius: '12px', fontSize: '11px', fontWeight: 'bold' }}
-                />
-                <Legend wrapperStyle={{ fontSize: '11px', paddingTop: '10px' }} />
-                <Area type="monotone" dataKey="tonnageMT" name="Tonnage (MT)" stroke="#1F4D2B" strokeWidth={2.5} fillOpacity={1} fill="url(#tonnageGrad)" />
-                <Area type="monotone" dataKey="costLakhs" name="Cost (₹ Lakhs)" stroke="#C5A059" strokeWidth={2.5} fillOpacity={1} fill="url(#costGrad)" />
-              </AreaChart>
-            </ResponsiveContainer>
-          </div>
-        </div>
-
-        {/* 7-Day Arrival vs Dispatch Mini-Charts Dashboard Card */}
-        <div className="lg:col-span-12 bg-white border border-[#E5DEC9] rounded-2xl p-5 shadow-xs space-y-4">
-          <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2 border-b border-[#F2EDE0] pb-3">
-            <div>
-              <h3 className="text-sm font-bold uppercase tracking-wider text-[#1E331B] font-mono flex items-center gap-2">
-                <Truck className="w-4 h-4 text-emerald-700" />
-                7-Day Arrival vs Dispatch Trends & Volume Summary
-              </h3>
-              <p className="text-[11px] text-[#556952] mt-0.5">
-                Comparative analysis of raw material gate arrivals (MT / Bales) versus finished goods dispatches over the last 7 operating days.
-              </p>
-            </div>
-            <span className="text-[10px] bg-emerald-50 text-emerald-800 border border-emerald-200 px-2.5 py-1 rounded-lg font-mono font-bold flex items-center gap-1.5">
-              <span className="w-2 h-2 rounded-full bg-emerald-600 animate-pulse" />
-              Multi-Chart Analytics
-            </span>
-          </div>
-
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-            
-            {/* Chart 1: Arrival vs Dispatch MT Area Chart */}
-            <div className="bg-[#FAF7F0] border border-[#D6CAA8] rounded-xl p-3.5 shadow-2xs space-y-2">
-              <div className="flex justify-between items-center text-xs font-bold font-mono uppercase">
-                <span className="text-[#1E331B]">Arrival vs Dispatch (MT)</span>
-                <span className="text-emerald-800 bg-emerald-100 px-2 py-0.5 rounded text-[10px]">Tonnage Trend</span>
-              </div>
-              <div className="h-44 w-full min-h-[176px]">
-                <ResponsiveContainer width="100%" height="100%" minWidth={100} minHeight={100}>
-                  <AreaChart data={arrivalVsDispatch7Days}>
-                    <defs>
-                      <linearGradient id="colorArrival" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="5%" stopColor="#1F4D2B" stopOpacity={0.8}/>
-                        <stop offset="95%" stopColor="#1F4D2B" stopOpacity={0.1}/>
-                      </linearGradient>
-                      <linearGradient id="colorDispatch" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="5%" stopColor="#C5A059" stopOpacity={0.8}/>
-                        <stop offset="95%" stopColor="#C5A059" stopOpacity={0.1}/>
-                      </linearGradient>
-                    </defs>
-                    <CartesianGrid strokeDasharray="3 3" stroke="#F2EDE0" />
-                    <XAxis dataKey="day" stroke="#556952" fontSize={10} />
-                    <YAxis stroke="#556952" fontSize={10} />
-                    <Tooltip contentStyle={{ backgroundColor: '#FAF7F0', borderColor: '#D6CAA8', borderRadius: 8, fontSize: 11, fontWeight: 'bold' }} />
-                    <Area type="monotone" dataKey="arrivalMT" name="Arrival MT" stroke="#1F4D2B" fillOpacity={1} fill="url(#colorArrival)" />
-                    <Area type="monotone" dataKey="dispatchMT" name="Dispatch MT" stroke="#C5A059" fillOpacity={1} fill="url(#colorDispatch)" />
-                  </AreaChart>
-                </ResponsiveContainer>
-              </div>
-            </div>
-
-            {/* Chart 2: Arrival vs Dispatch Bales Bar Chart */}
-            <div className="bg-[#FAF7F0] border border-[#D6CAA8] rounded-xl p-3.5 shadow-2xs space-y-2">
-              <div className="flex justify-between items-center text-xs font-bold font-mono uppercase">
-                <span className="text-[#1E331B]">Bales Volumetric Comparison</span>
-                <span className="text-blue-800 bg-blue-100 px-2 py-0.5 rounded text-[10px]">Bales Count</span>
-              </div>
-              <div className="h-44 w-full min-h-[176px]">
-                <ResponsiveContainer width="100%" height="100%" minWidth={100} minHeight={100}>
-                  <BarChart data={arrivalVsDispatch7Days}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="#F2EDE0" />
-                    <XAxis dataKey="day" stroke="#556952" fontSize={10} />
-                    <YAxis stroke="#556952" fontSize={10} />
-                    <Tooltip contentStyle={{ backgroundColor: '#FAF7F0', borderColor: '#D6CAA8', borderRadius: 8, fontSize: 11, fontWeight: 'bold' }} />
-                    <Bar dataKey="arrivalBales" name="Arrival Bales" fill="#1F4D2B" radius={[4, 4, 0, 0]} />
-                    <Bar dataKey="dispatchBales" name="Dispatch Bales" fill="#3B82F6" radius={[4, 4, 0, 0]} />
-                  </BarChart>
-                </ResponsiveContainer>
-              </div>
-            </div>
-
-            {/* Chart 3: Net Inflow / Delta Trend Line Chart */}
-            <div className="bg-[#FAF7F0] border border-[#D6CAA8] rounded-xl p-3.5 shadow-2xs space-y-2">
-              <div className="flex justify-between items-center text-xs font-bold font-mono uppercase">
-                <span className="text-[#1E331B]">Net Stock Surplus Delta (MT)</span>
-                <span className="text-purple-800 bg-purple-100 px-2 py-0.5 rounded text-[10px]">Inflow Delta</span>
-              </div>
-              <div className="h-44 w-full min-h-[176px]">
-                <ResponsiveContainer width="100%" height="100%" minWidth={100} minHeight={100}>
-                  <LineChart data={arrivalVsDispatch7Days}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="#F2EDE0" />
-                    <XAxis dataKey="day" stroke="#556952" fontSize={10} />
-                    <YAxis stroke="#556952" fontSize={10} />
-                    <Tooltip contentStyle={{ backgroundColor: '#FAF7F0', borderColor: '#D6CAA8', borderRadius: 8, fontSize: 11, fontWeight: 'bold' }} />
-                    <Line type="monotone" dataKey="netDelta" name="Net Delta (MT)" stroke="#8B5CF6" strokeWidth={3} dot={{ fill: '#8B5CF6', r: 4 }} />
-                  </LineChart>
-                </ResponsiveContainer>
-              </div>
-            </div>
-
-          </div>
-        </div>
-
-        {/* Visual 2: Procurement by Quality Grade Stacked Bar */}
-        <div className="lg:col-span-5 bg-white border border-[#E5DEC9] rounded-2xl p-5 shadow-xs flex flex-col justify-between">
-          <div>
-            <div className="flex items-center justify-between mb-4 border-b border-[#F2EDE0] pb-3">
-              <div>
-                <h3 className="text-sm font-bold uppercase tracking-wider text-[#1E331B] font-mono flex items-center gap-2">
-                  <BarChart3 className="w-4 h-4 text-emerald-700" />
-                  Quality Grade Share & Rate Matrix
-                </h3>
-                <p className="text-[11px] text-[#556952] mt-0.5">Distribution across TD-4, TD-5, TD-6 & W-5 grades</p>
-              </div>
-            </div>
-
-            <div className="h-48 w-full">
-              <ResponsiveContainer width="100%" height="100%" minWidth={100} minHeight={100}>
-                <BarChart data={gradeCompositionData} layout="vertical" margin={{ top: 5, right: 10, left: 10, bottom: 5 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#F2EDE0" />
-                  <XAxis type="number" tick={{ fontSize: 10, fill: '#556952' }} />
-                  <YAxis dataKey="grade" type="category" tick={{ fontSize: 11, fontWeight: 'bold', fill: '#1E331B' }} />
-                  <Tooltip contentStyle={{ backgroundColor: '#FAF7F0', borderColor: '#D6CAA8', borderRadius: '12px', fontSize: '11px' }} />
-                  <Bar dataKey="qtl" name="Quantity (Qtl)" fill="#1F4D2B" radius={[0, 6, 6, 0]}>
-                    {gradeCompositionData.map((entry, index) => (
-                      <Cell key={`cell-${index}`} fill={entry.color} />
-                    ))}
-                  </Bar>
-                </BarChart>
-              </ResponsiveContainer>
-            </div>
-          </div>
-
-          <div className="grid grid-cols-5 gap-1 pt-3 border-t border-[#F2EDE0] text-center">
-            {gradeCompositionData.map(g => (
-              <div key={g.grade} className="bg-[#FAF7F0] p-1.5 rounded-lg border border-[#E5DEC9]">
-                <div className="text-[10px] font-bold text-[#1E331B]">{g.grade}</div>
-                <div className="text-[11px] font-extrabold text-emerald-800">{g.pct}%</div>
-                <div className="text-[9px] text-[#556952]">₹{g.avgRate}</div>
-              </div>
-            ))}
-          </div>
-        </div>
-      </div>
-
-      {/* Row 3: End-to-End Jute Mill Flow Pipeline + Department Target vs Actual */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-        {/* Visual 5: End-to-End Process Pipeline Flow */}
-        {/* <div className="lg:col-span-6 bg-white border border-[#E5DEC9] rounded-2xl p-5 shadow-xs">
-          <div className="flex items-center justify-between mb-4 border-b border-[#F2EDE0] pb-3">
-            <div>
-              <h3 className="text-sm font-bold uppercase tracking-wider text-[#1E331B] font-mono flex items-center gap-2">
-                <Layers className="w-4 h-4 text-emerald-700" />
-                End-to-End Mill Operational Pipeline Flow
-              </h3>
-              <p className="text-[11px] text-[#556952] mt-0.5">Gate Arrival ➔ Quality Inspection ➔ Godowns ➔ Spinning ➔ Dispatch</p>
-            </div>
-            <span className="text-[10px] bg-teal-50 text-teal-800 border border-teal-200 px-2.5 py-1 rounded-lg font-mono font-bold">
-              Pipeline Funnel
-            </span>
-          </div>
-
-          <div className="space-y-2.5 py-2">
-            {pipelineFlowData.map((step, idx) => (
-              <div key={step.stage} className="space-y-1">
-                <div className="flex justify-between text-xs font-bold text-[#1E331B]">
-                  <span>{idx + 1}. {step.stage}</span>
-                  <span className="font-mono text-emerald-800">{step.label}</span>
-                </div>
-                <div className="w-full bg-[#FAF7F0] border border-[#E5DEC9] rounded-full h-3 overflow-hidden p-0.5">
-                  <div 
-                    className="bg-gradient-to-r from-[#1F4D2B] to-[#2E6B3E] h-full rounded-full transition-all duration-500" 
-                    style={{ width: `${step.val}%` }} 
-                  />
+              <div className="flex items-center gap-1">
+                {(serverError || (metrics.currentGodownStockMt === 0 && metrics.totalArrivalsCount > 0)) && (
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      loadServerSummary(selectedYear);
+                      onRefresh();
+                    }}
+                    className="p-1 px-2 rounded-lg bg-amber-100 hover:bg-amber-200 text-amber-900 border border-amber-300 text-[10px] font-bold flex items-center gap-1 transition-colors cursor-pointer"
+                    title="Retry Stock Query"
+                  >
+                    <RefreshCw className={cn("w-3 h-3", serverLoading && "animate-spin")} />
+                    <span>Retry</span>
+                  </button>
+                )}
+                <div className="p-1.5 rounded-xl bg-slate-100 text-slate-800 border border-slate-300 group-hover:bg-slate-200 transition-colors">
+                  <Warehouse className="w-4 h-4 text-slate-800" />
                 </div>
               </div>
-            ))}
-          </div>
-        </div> */}
-        {/* Visual 8: Godown Capacity Heatmap Bar Chart */}
-        <div className="lg:col-span-6 bg-white border border-[#E5DEC9] rounded-2xl p-5 shadow-xs">
-          <div className="flex items-center justify-between mb-4 border-b border-[#F2EDE0] pb-3">
-            <div>
-              <h3 className="text-sm font-bold uppercase tracking-wider text-[#1E331B] font-mono flex items-center gap-2">
-                <Warehouse className="w-4 h-4 text-emerald-700" />
-                Godown Storage Tonnage & Utilization Heatmap
-              </h3>
-              <p className="text-[11px] text-[#556952] mt-0.5">Capacity vs used stock across 31 raw jute godowns</p>
             </div>
-            <span className="text-[10px] bg-amber-50 text-amber-800 border border-amber-200 px-2.5 py-1 rounded-lg font-mono font-bold">
-              Capacity Stack
-            </span>
+
+            <div className="my-2">
+              <div className="text-2xl font-numeric font-extrabold text-slate-900 tracking-tight flex items-baseline gap-1.5">
+                <span>{metrics.currentGodownStockMt.toLocaleString('en-IN', { minimumFractionDigits: 3 })}</span>
+                <span className="text-xs font-sans font-semibold text-slate-600">MT</span>
+              </div>
+              <div className="text-[11px] text-slate-700 font-bold mt-0.5 font-numeric flex items-center justify-between">
+                <span>
+                  {metrics.currentGodownStockBales.toLocaleString('en-IN')} Bales
+                  {metrics.currentGodownStockDrums > 0 ? ` • ${metrics.currentGodownStockDrums.toLocaleString('en-IN')} Drums` : ''}
+                </span>
+                <span className="text-[10px] text-emerald-700 font-bold">{metrics.godownUtilizationPct}% Cap</span>
+              </div>
+            </div>
+
+            {/* Inventory Movements */}
+            <div className="pt-2.5 border-t border-slate-200 text-[10px] space-y-1">
+              <div className="flex items-center justify-between text-slate-700">
+                <span>Opening: {metrics.totalOpeningQty.toLocaleString('en-IN')} Units</span>
+                <span>Inward: +{metrics.totalStockInwardBales.toLocaleString('en-IN')}</span>
+              </div>
+              <div className="flex items-center justify-between text-rose-800 font-bold">
+                <span>Outward / Factory Issue:</span>
+                <span className="font-numeric">-{metrics.totalStockOutwardBales.toLocaleString('en-IN')} Units</span>
+              </div>
+            </div>
           </div>
 
-          <div className="h-64 w-full">
-            <ResponsiveContainer width="100%" height="100%" minWidth={100} minHeight={100}>
-              <BarChart data={godownHeatmapData} margin={{ top: 10, right: 10, left: -10, bottom: 0 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#F2EDE0" />
-                <XAxis dataKey="name" tick={{ fontSize: 9, fill: '#556952' }} />
-                <YAxis tick={{ fontSize: 10, fill: '#556952' }} />
-                <Tooltip contentStyle={{ backgroundColor: '#FAF7F0', borderColor: '#D6CAA8', borderRadius: '12px', fontSize: '11px' }} />
-                <Legend wrapperStyle={{ fontSize: '11px', paddingTop: '10px' }} />
-                <Bar dataKey="capacity" name="Total Capacity (MT)" fill="#E5DEC9" radius={[4, 4, 0, 0]} />
-                <Bar dataKey="used" name="Utilized Stock (MT)" fill="#1F4D2B" radius={[4, 4, 0, 0]} />
-              </BarChart>
-            </ResponsiveContainer>
+          <div className="mt-3 pt-1.5 border-t border-dashed border-slate-300 text-[10px] font-bold text-slate-800 flex items-center justify-between group-hover:translate-x-0.5 transition-transform">
+            <span>View Stock Inventory</span>
+            <span className="text-xs font-bold">→</span>
           </div>
         </div>
-        
+
       </div>
 
-      {/* Row 4: Moisture Distribution Scatter & Godown Storage Capacity Heatmap */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-        {/* Visual 7: Moisture vs Weight Scatter Plot */}
-        {/* <div className="lg:col-span-6 bg-white border border-[#E5DEC9] rounded-2xl p-5 shadow-xs">
-          <div className="flex items-center justify-between mb-4 border-b border-[#F2EDE0] pb-3">
-            <div>
-              <h3 className="text-sm font-bold uppercase tracking-wider text-[#1E331B] font-mono flex items-center gap-2">
-                <Droplets className="w-4 h-4 text-emerald-700" />
-                Moisture % vs. Shipment Tonnage Correlation
-              </h3>
-            </div>
-            <span className="text-[10px] bg-cyan-50 text-cyan-800 border border-cyan-200 px-2.5 py-1 rounded-lg font-mono font-bold">
-              Scatter Plot
-            </span>
-          </div>
-
-          <div className="h-64 w-full">
-            <ResponsiveContainer width="100%" height="100%" minWidth={100} minHeight={100}>
-              <ScatterChart margin={{ top: 10, right: 10, left: -10, bottom: 0 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#F2EDE0" />
-                <XAxis dataKey="moisture" name="Moisture %" unit="%" domain={[11, 17]} tick={{ fontSize: 10, fill: '#556952' }} />
-                <YAxis dataKey="weight" name="Tonnage" unit=" Qtl" tick={{ fontSize: 10, fill: '#556952' }} />
-                <Tooltip cursor={{ strokeDasharray: '3 3' }} contentStyle={{ backgroundColor: '#FAF7F0', borderColor: '#D6CAA8', borderRadius: '12px', fontSize: '11px' }} />
-                <Scatter name="Shipments" data={moistureScatterData} fill="#1F4D2B" />
-              </ScatterChart>
-            </ResponsiveContainer>
-          </div>
-        </div> */}
-        {/* Visual 6: Department Target vs Actual Production Output */}
-        {/* <div className="lg:col-span-6 bg-white border border-[#E5DEC9] rounded-2xl p-5 shadow-xs">
-          <div className="flex items-center justify-between mb-4 border-b border-[#F2EDE0] pb-3">
-            <div>
-              <h3 className="text-sm font-bold uppercase tracking-wider text-[#1E331B] font-mono flex items-center gap-2">
-                <Factory className="w-4 h-4 text-emerald-700" />
-                Department Target vs. Actual Output (MT)
-              </h3>
-              <p className="text-[11px] text-[#556952] mt-0.5">Comparing target production vs actual department yields</p>
-            </div>
-            <span className="text-[10px] bg-indigo-50 text-indigo-800 border border-indigo-200 px-2.5 py-1 rounded-lg font-mono font-bold">
-              Grouped Bar
-            </span>
-          </div>
-
-          <div className="h-64 w-full">
-            <ResponsiveContainer width="100%" height="100%" minWidth={100} minHeight={100}>
-              <BarChart data={deptOutputData} margin={{ top: 10, right: 10, left: -10, bottom: 0 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#F2EDE0" />
-                <XAxis dataKey="dept" tick={{ fontSize: 9, fill: '#556952' }} />
-                <YAxis tick={{ fontSize: 10, fill: '#556952' }} />
-                <Tooltip contentStyle={{ backgroundColor: '#FAF7F0', borderColor: '#D6CAA8', borderRadius: '12px', fontSize: '11px' }} />
-                <Legend wrapperStyle={{ fontSize: '11px', paddingTop: '10px' }} />
-                <Bar dataKey="target" name="Target (MT)" fill="#D6CAA8" radius={[4, 4, 0, 0]} />
-                <Bar dataKey="actual" name="Actual Output (MT)" fill="#1F4D2B" radius={[4, 4, 0, 0]} />
-              </BarChart>
-            </ResponsiveContainer>
-          </div>
-        </div> */}
+      {/* 3. MONTH-WISE SUMMARY SECTION */}
+      <div className="bg-[#FAF7F0] border-2 border-[#D6CAA8] rounded-2xl p-4 sm:p-5 shadow-sm space-y-4">
         
-      </div>
-
-      {/* 6. POWER BI STYLE EXECUTIVE MATRIX CROSSTAB TABLE */}
-      <div className="bg-white border border-[#E5DEC9] rounded-2xl p-5 shadow-xs space-y-4">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-[#F2EDE0] pb-3">
-          <div>
-            <h3 className="text-sm font-bold uppercase tracking-wider text-[#1E331B] font-mono flex items-center gap-2">
-              <FileSpreadsheet className="w-4 h-4 text-emerald-700" />
-              Executive BI Data Matrix Crosstab
-            </h3>
-            <p className="text-[11px] text-[#556952] mt-0.5">
-              Detailed procurement transactions, weighbridge results & quality inspections
-            </p>
+        {/* Section Header with Dynamic Year Dropdown */}
+        <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-[#E5DEC9]">
+          <div className="flex items-center gap-2.5">
+            <div className="p-2 bg-[#1E331B] text-white rounded-xl shadow-xs">
+              <Calendar className="w-5 h-5 text-[#C5A059]" />
+            </div>
+            <div>
+              <h2 className="text-base font-extrabold text-[#1E331B] font-serif uppercase tracking-wide">
+                Month-Wise Summary
+              </h2>
+              <p className="text-xs text-[#556952]">
+                Detailed Contract, Pending, Payment & Outstanding Balance Breakdown ({selectedYear})
+              </p>
+            </div>
           </div>
 
+          {/* Dynamic Year Dropdown Selector */}
           <div className="flex items-center gap-2">
+            <label htmlFor="summary_year_select" className="text-xs font-bold text-[#1E331B] uppercase tracking-wider">
+              Year:
+            </label>
             <div className="relative">
-              <Search className="w-3.5 h-3.5 absolute left-3 top-2.5 text-[#556952]" />
+              <select
+                id="summary_year_select"
+                value={selectedYear}
+                onChange={(e) => setSelectedYear(Number(e.target.value))}
+                className="appearance-none bg-white border-2 border-[#2E6B3E] text-[#1E331B] font-black text-xs px-3.5 py-1.5 pr-8 rounded-xl shadow-xs focus:outline-none focus:ring-2 focus:ring-[#2E6B3E] cursor-pointer"
+              >
+                {availableYears.map((yr) => (
+                  <option key={yr} value={yr}>
+                    {yr}
+                  </option>
+                ))}
+              </select>
+              <ChevronDown className="w-3.5 h-3.5 text-[#2E6B3E] absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+            </div>
+          </div>
+        </div>
+
+        {/* 12 MONTHLY CARDS RESPONSIVE GRID */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3.5">
+          {monthlySummaryData.map((month) => {
+            const hasData = month.totalContractsCount > 0 || month.monthlyTotalPaid > 0 || month.pendingContractsCount > 0;
+
+            return (
+              <div
+                key={month.monthIndex}
+                className={cn(
+                  "bg-white border rounded-xl p-3.5 shadow-xs hover:shadow-md transition-all flex flex-col justify-between group",
+                  hasData 
+                    ? "border-[#D6CAA8] hover:border-[#2E6B3E]" 
+                    : "border-slate-200 opacity-80 hover:opacity-100"
+                )}
+              >
+                {/* Month Name Header */}
+                <div className="flex items-center justify-between pb-2 border-b border-[#F2EDE0]">
+                  <h3 className="text-xs font-extrabold text-[#1E331B] uppercase tracking-wider flex items-center gap-1.5">
+                    <span className="w-2 h-2 rounded-full bg-[#2E6B3E]" />
+                    {month.monthName} {selectedYear}
+                  </h3>
+                  {hasData ? (
+                    <span className="px-2 py-0.5 bg-emerald-50 text-emerald-800 text-[10px] font-bold rounded-md border border-emerald-200">
+                      {month.totalContractsCount} Saudas
+                    </span>
+                  ) : (
+                    <span className="text-[10px] text-slate-400 font-medium italic">No activity</span>
+                  )}
+                </div>
+
+                {/* 4 Key Metrics */}
+                <div className="py-2.5 space-y-2 text-xs">
+                  
+                  {/* 1. Total Contract Sauda */}
+                  <div 
+                    onClick={() => month.totalContractsCount > 0 && openDrillDown('monthly_sauda', `${month.monthName} ${selectedYear} - Total Contract Sauda`, month.matchingSaudas, month.monthName, selectedYear)}
+                    className={cn(
+                      "flex items-center justify-between p-1.5 rounded-lg transition-colors",
+                      month.totalContractsCount > 0 ? "hover:bg-emerald-50 cursor-pointer" : ""
+                    )}
+                    title="Click to view contract details"
+                  >
+                    <span className="text-[11px] text-[#556952] font-semibold flex items-center gap-1">
+                      <Package className="w-3.5 h-3.5 text-[#2E6B3E]" /> Total Contract Sauda:
+                    </span>
+                    <span className="font-extrabold text-[#1E331B] font-numeric">
+                      {month.totalContractsCount} <span className="text-[10px] text-[#556952]">({month.totalContractsWeightMT} MT)</span>
+                    </span>
+                  </div>
+
+                  {/* 2. Pending Sauda */}
+                  <div 
+                    onClick={() => month.pendingContractsCount > 0 && openDrillDown('monthly_pending', `${month.monthName} ${selectedYear} - Pending Sauda`, month.matchingPendingSaudas, month.monthName, selectedYear)}
+                    className={cn(
+                      "flex items-center justify-between p-1.5 rounded-lg transition-colors",
+                      month.pendingContractsCount > 0 ? "hover:bg-amber-50 cursor-pointer" : ""
+                    )}
+                    title="Click to view pending sauda"
+                  >
+                    <span className="text-[11px] text-amber-800 font-semibold flex items-center gap-1">
+                      <Clock className="w-3.5 h-3.5 text-amber-600" /> Pending Sauda:
+                    </span>
+                    <span className="font-extrabold text-amber-900 font-numeric">
+                      {month.pendingContractsCount} <span className="text-[10px] text-amber-700">({month.pendingContractsWeightMT} MT)</span>
+                    </span>
+                  </div>
+
+                  {/* 3. Total Payment */}
+                  <div 
+                    onClick={() => month.monthlyTotalPaid > 0 && openDrillDown('monthly_payment', `${month.monthName} ${selectedYear} - Payments Disbursed`, month.matchingPayments, month.monthName, selectedYear)}
+                    className={cn(
+                      "flex items-center justify-between p-1.5 rounded-lg transition-colors",
+                      month.monthlyTotalPaid > 0 ? "hover:bg-emerald-50 cursor-pointer" : ""
+                    )}
+                    title="Click to view payments"
+                  >
+                    <span className="text-[11px] text-emerald-800 font-semibold flex items-center gap-1">
+                      <Coins className="w-3.5 h-3.5 text-emerald-600" /> Total Payment:
+                    </span>
+                    <span className="font-extrabold text-emerald-900 font-numeric">
+                      {formatIndianCurrency(month.monthlyTotalPaid)}
+                    </span>
+                  </div>
+
+                  {/* 4. Rest Payment (Outstanding) */}
+                  <div 
+                    onClick={() => month.monthlyRestPayment > 0 && openDrillDown('monthly_rest', `${month.monthName} ${selectedYear} - Outstanding Rest Balance`, month.matchingPayments, month.monthName, selectedYear)}
+                    className={cn(
+                      "flex items-center justify-between p-1.5 rounded-lg transition-colors",
+                      month.monthlyRestPayment > 0 ? "hover:bg-rose-50 cursor-pointer" : ""
+                    )}
+                    title="Click to view outstanding rest balances"
+                  >
+                    <span className="text-[11px] text-rose-800 font-semibold flex items-center gap-1">
+                      <Scale className="w-3.5 h-3.5 text-rose-600" /> Rest Payment:
+                    </span>
+                    <span className="font-extrabold text-rose-900 font-numeric">
+                      {formatIndianCurrency(month.monthlyRestPayment)}
+                    </span>
+                  </div>
+
+                </div>
+
+                {/* Card Footer Action */}
+                <div 
+                  onClick={() => openDrillDown('monthly_sauda', `${month.monthName} ${selectedYear} Records`, month.matchingSaudas, month.monthName, selectedYear)}
+                  className="pt-2 border-t border-[#F2EDE0] text-[10px] font-bold text-[#2E6B3E] flex items-center justify-between cursor-pointer group-hover:text-[#1E331B]"
+                >
+                  <span>Drill-down details</span>
+                  <ChevronRight className="w-3.5 h-3.5 transition-transform group-hover:translate-x-0.5" />
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* 4. PROCESS MATRIX DATA TABLE */}
+      <div className="bg-white border-2 border-[#D6CAA8] rounded-2xl p-4 sm:p-5 shadow-xs space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-[#F2EDE0]">
+          <div className="flex items-center gap-2">
+            <Layers className="w-5 h-5 text-[#2E6B3E]" />
+            <h3 className="font-serif text-sm sm:text-base font-bold text-[#1E331B] uppercase tracking-wide">
+              Recent Operational Process Matrix
+            </h3>
+          </div>
+
+          <div className="flex items-center gap-2 flex-1 max-w-sm">
+            <div className="relative w-full">
+              <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
               <input
- id="search_supplier_chalan_ve_1326" name="search_supplier_chalan_ve" aria-label="Search supplier, chalan, vehicle..."                type="text"
-                placeholder="Search supplier, chalan, vehicle..."
+                type="text"
                 value={matrixSearch}
-                onChange={(e) => { setMatrixSearch(e.target.value); setMatrixPage(1); }}
-                className="h-8 pl-8 pr-3 bg-[#FAF7F0] border border-[#D6CAA8] rounded-xl text-xs text-[#1E331B] focus:outline-none focus:ring-1 focus:ring-[#1E331B] w-48 sm:w-64"
+                onChange={(e) => setMatrixSearch(e.target.value)}
+                placeholder="Search PO, Supplier, Broker, Status..."
+                className="w-full pl-8 pr-3 py-1.5 text-xs bg-[#FAF7F0] border border-[#D6CAA8] rounded-xl focus:outline-none focus:ring-2 focus:ring-[#2E6B3E]"
               />
             </div>
-            <button
-              onClick={handleExportCsv}
-              className="h-8 px-3 bg-[#1E331B] text-white text-xs font-bold rounded-xl hover:bg-[#2A4426] transition-colors flex items-center gap-1.5 cursor-pointer"
-            >
-              <Download className="w-3.5 h-3.5" />
-              <span>CSV</span>
-            </button>
           </div>
         </div>
 
         {/* Matrix Table */}
-        <div className="overflow-x-auto rounded-xl border border-[#E5DEC9]">
-          <table className="w-full text-left border-collapse text-xs min-w-[850px]">
+        <div className="overflow-x-auto rounded-xl border border-[#D6CAA8]">
+          <table className="w-full text-left text-xs border-collapse">
             <thead>
-              <tr className="bg-[#FAF7F0] border-b border-[#E5DEC9] text-[#1E331B] font-mono text-[11px] uppercase tracking-wider">
-                <th className="p-3 font-bold">Chalan / Pass</th>
-                <th className="p-3 font-bold">Date</th>
-                <th className="p-3 font-bold">Supplier</th>
-                <th className="p-3 font-bold">Broker</th>
-                <th className="p-3 font-bold">Vehicle No</th>
-                <th className="p-3 font-bold">Grade</th>
-                <th className="p-3 font-bold text-right">Net Wt (Qtl)</th>
-                <th className="p-3 font-bold text-center">Moisture %</th>
-                <th className="p-3 font-bold text-right">Total Value (₹)</th>
-                <th className="p-3 font-bold text-center">Status</th>
+              <tr className="bg-[#1E331B] text-[#D6CAA8] uppercase font-bold tracking-wider text-[10px]">
+                <th className="p-2.5">Date</th>
+                <th className="p-2.5">PO / PTF No</th>
+                <th className="p-2.5">Supplier</th>
+                <th className="p-2.5">Broker</th>
+                <th className="p-2.5 text-right">Contract MT</th>
+                <th className="p-2.5 text-right">Value (₹)</th>
+                <th className="p-2.5 text-center">Status</th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-[#F2EDE0] font-sans">
-              {paginatedMatrixRows.length > 0 ? (
-                paginatedMatrixRows.map((row) => (
-                  <tr key={row.id} className="hover:bg-[#FAF7F0]/60 transition-colors">
-                    <td className="p-3 font-mono font-bold text-[#1E331B]">{row.chalan}</td>
-                    <td className="p-3 text-[#556952]">{row.date}</td>
-                    <td className="p-3 font-medium text-[#1E331B]">{safeStr(row.supplier)}</td>
-                    <td className="p-3 text-[#556952]">{safeStr(row.broker)}</td>
-                    <td className="p-3 font-mono text-xs">{row.vehicle}</td>
-                    <td className="p-3 font-bold text-emerald-900">{safeStr(row.grade)}</td>
-                    <td className="p-3 text-right font-bold text-[#1E331B]">{row.netWt}</td>
-                    <td className="p-3 text-center font-mono">
-                      <span className={cn(
-                        "px-2 py-0.5 rounded-md font-bold text-[10px]",
-                        Number(row.moisture) <= 15 ? "bg-emerald-100 text-emerald-800" : "bg-rose-100 text-rose-800"
-                      )}>
-                        {row.moisture}%
-                      </span>
-                    </td>
-                    <td className="p-3 text-right font-mono font-bold text-[#1E331B]">
-                      ₹ {row.totalVal.toLocaleString('en-IN')}
-                    </td>
-                    <td className="p-3 text-center">
-                      <span className="px-2.5 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider bg-emerald-100 border border-emerald-300 text-emerald-900">
-                        {row.status}
-                      </span>
-                    </td>
-                  </tr>
-                ))
-              ) : (
-                <tr>
-                  <td colSpan={10} className="p-6 text-center text-[#556952] italic">
-                    No matching procurement records found...
-                  </td>
-                </tr>
-              )}
+            <tbody className="divide-y divide-[#F2EDE0] bg-white">
+              {metrics.scpList
+                .filter(r => {
+                  if (!matrixSearch.trim()) return true;
+                  const term = matrixSearch.toLowerCase();
+                  return (
+                    String(r.po_no || r.ptf_no || '').toLowerCase().includes(term) ||
+                    String(r.supplier || '').toLowerCase().includes(term) ||
+                    String(r.broker || '').toLowerCase().includes(term) ||
+                    String(r.status || '').toLowerCase().includes(term)
+                  );
+                })
+                .slice((matrixPage - 1) * rowsPerPage, matrixPage * rowsPerPage)
+                .map((row, idx) => {
+                  const { wt, val, sup, brk } = getRowMetrics(row);
+                  const st = String(row.status || (row.pending ? 'Pending' : 'Completed')).toUpperCase();
+
+                  return (
+                    <tr key={idx} className="hover:bg-[#FAF7F0] transition-colors">
+                      <td className="p-2.5 font-mono text-slate-600">{formatDate(row.date || row.po_date || row.created_at)}</td>
+                      <td className="p-2.5 font-bold text-indigo-900">{row.po_no || row.ptf_no || row.sauda_no || 'N/A'}</td>
+                      <td className="p-2.5 text-slate-800 font-medium">{safeStr(sup)}</td>
+                      <td className="p-2.5 text-slate-600">{safeStr(brk)}</td>
+                      <td className="p-2.5 text-right font-numeric font-bold">{wt.toFixed(2)} MT</td>
+                      <td className="p-2.5 text-right font-numeric font-bold text-[#2E6B3E]">{formatIndianCurrency(val)}</td>
+                      <td className="p-2.5 text-center">
+                        <span className={cn(
+                          "px-2 py-0.5 rounded-full text-[10px] font-bold",
+                          st.includes('PEND') ? "bg-amber-100 text-amber-800 border border-amber-300" :
+                          st.includes('COMP') || st.includes('PASS') || st.includes('APP') ? "bg-emerald-100 text-emerald-800 border border-emerald-300" :
+                          "bg-slate-100 text-slate-700"
+                        )}>
+                          {st}
+                        </span>
+                      </td>
+                    </tr>
+                  );
+                })}
             </tbody>
           </table>
         </div>
+      </div>
 
-        {/* Matrix Pagination */}
-        <div className="flex items-center justify-between text-xs text-[#556952] font-mono pt-2">
-          <span>
-            Showing page {matrixPage} of {Math.max(1, Math.ceil(searchedMatrixRows.length / rowsPerPage))} ({searchedMatrixRows.length} total rows)
-          </span>
-          <div className="flex items-center gap-2">
-            <button
-              disabled={matrixPage === 1}
-              onClick={() => setMatrixPage(p => Math.max(1, p - 1))}
-              className="px-3 py-1 bg-[#FAF7F0] border border-[#D6CAA8] rounded-lg disabled:opacity-50 font-bold hover:bg-[#EAE2D2] cursor-pointer"
-            >
-              Previous
-            </button>
-            <button
-              disabled={matrixPage >= Math.ceil(searchedMatrixRows.length / rowsPerPage)}
-              onClick={() => setMatrixPage(p => p + 1)}
-              className="px-3 py-1 bg-[#FAF7F0] border border-[#D6CAA8] rounded-lg disabled:opacity-50 font-bold hover:bg-[#EAE2D2] cursor-pointer"
-            >
-              Next
-            </button>
+      {/* 5. UNIVERSAL INTERACTIVE DRILL-DOWN MODAL */}
+      {drillDown.isOpen && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-3 sm:p-6 animate-in fade-in duration-150">
+          <div className="bg-white border-2 border-[#D6CAA8] rounded-2xl shadow-2xl w-full max-w-5xl max-h-[90vh] flex flex-col overflow-hidden">
+            
+            {/* Modal Header */}
+            <div className="bg-gradient-to-r from-[#1E331B] to-[#2E6B3E] text-white p-4 flex items-center justify-between gap-3">
+              <div>
+                <h3 className="font-serif text-base font-bold uppercase tracking-wider flex items-center gap-2">
+                  <span>📊</span> {drillDown.title}
+                </h3>
+                <p className="text-xs text-[#D6CAA8]">
+                  Total {filteredDrillDownData.length} records matching current criteria
+                </p>
+              </div>
+              <button
+                onClick={() => setDrillDown({ ...drillDown, isOpen: false })}
+                className="p-1.5 hover:bg-white/20 rounded-xl text-white transition-colors cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Search & Export Toolbar */}
+            <div className="p-3 bg-[#FAF7F0] border-b border-[#E5DEC9] flex flex-wrap items-center justify-between gap-3">
+              <div className="relative flex-1 max-w-md">
+                <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                <input
+                  type="text"
+                  value={drillDownSearch}
+                  onChange={(e) => {
+                    setDrillDownSearch(e.target.value);
+                    setDrillDownPage(1);
+                  }}
+                  placeholder="Filter records..."
+                  className="w-full pl-9 pr-3 py-1.5 text-xs bg-white border border-[#D6CAA8] rounded-xl focus:outline-none focus:ring-2 focus:ring-[#2E6B3E]"
+                />
+              </div>
+
+              <div className="text-xs font-bold text-[#556952]">
+                Page {drillDownPage} of {Math.max(1, Math.ceil(filteredDrillDownData.length / drillDownRowsPerPage))}
+              </div>
+            </div>
+
+            {/* Modal Table Content */}
+            <div className="flex-1 overflow-auto p-4">
+              {filteredDrillDownData.length === 0 ? (
+                <div className="text-center py-12 text-[#556952]">
+                  <p className="text-sm font-semibold">No detailed records found.</p>
+                </div>
+              ) : (
+                <table className="w-full text-left text-xs border-collapse">
+                  <thead>
+                    <tr className="bg-[#1E331B] text-[#D6CAA8] uppercase font-bold tracking-wider text-[10px] sticky top-0 shadow-xs">
+                      <th className="p-2.5">Date</th>
+                      <th className="p-2.5">Ref / PO / Voucher</th>
+                      <th className="p-2.5">Supplier / Party</th>
+                      <th className="p-2.5">Broker</th>
+                      <th className="p-2.5 text-right">Quantity / MT</th>
+                      <th className="p-2.5 text-right">Amount (₹)</th>
+                      <th className="p-2.5 text-center">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-[#F2EDE0] bg-white">
+                    {filteredDrillDownData
+                      .slice((drillDownPage - 1) * drillDownRowsPerPage, drillDownPage * drillDownRowsPerPage)
+                      .map((row, idx) => {
+                        const dateStr = formatDate(row.date || row.po_date || row.payment_date || row.created_at);
+                        const refStr = row.po_no || row.ptf_no || row.voucher_no || row.sauda_no || 'N/A';
+                        const supStr = safeStr(row.supplier || row.supplier_name || row.party_name);
+                        const brkStr = safeStr(row.broker || row.broker_name);
+                        const wtStr = Number(row.total_contract_mt || row.contract_mt || row.total_wt_in_ton || 0);
+                        const amtStr = Number(row.paid_amount || row.payable_amt || row.total_contract_value || row.amount || 0);
+                        const stStr = String(row.status || row.payment_status || row.display_status || 'Active').toUpperCase();
+
+                        return (
+                          <tr key={idx} className="hover:bg-[#FAF7F0] transition-colors">
+                            <td className="p-2.5 font-mono text-slate-600">{dateStr}</td>
+                            <td className="p-2.5 font-bold text-indigo-900">{refStr}</td>
+                            <td className="p-2.5 font-medium text-slate-800">{supStr}</td>
+                            <td className="p-2.5 text-slate-600">{brkStr}</td>
+                            <td className="p-2.5 text-right font-numeric font-bold">{wtStr > 0 ? `${wtStr.toFixed(2)} MT` : '-'}</td>
+                            <td className="p-2.5 text-right font-numeric font-bold text-[#2E6B3E]">{formatIndianCurrency(amtStr)}</td>
+                            <td className="p-2.5 text-center">
+                              <span className={cn(
+                                "px-2 py-0.5 rounded-full text-[10px] font-bold",
+                                stStr.includes('PEND') ? "bg-amber-100 text-amber-800 border border-amber-300" :
+                                stStr.includes('COMP') || stStr.includes('PASS') || stStr.includes('PAID') ? "bg-emerald-100 text-emerald-800 border border-emerald-300" :
+                                "bg-slate-100 text-slate-700"
+                              )}>
+                                {stStr}
+                              </span>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                  </tbody>
+                </table>
+              )}
+            </div>
+
+            {/* Modal Pagination Footer */}
+            <div className="p-3 bg-[#FAF7F0] border-t border-[#E5DEC9] flex items-center justify-between gap-3">
+              <span className="text-xs text-[#556952]">
+                Showing {Math.min(filteredDrillDownData.length, (drillDownPage - 1) * drillDownRowsPerPage + 1)} - {Math.min(filteredDrillDownData.length, drillDownPage * drillDownRowsPerPage)} of {filteredDrillDownData.length}
+              </span>
+
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => setDrillDownPage(p => Math.max(1, p - 1))}
+                  disabled={drillDownPage <= 1}
+                  className="px-3 py-1 bg-white border border-[#D6CAA8] rounded-lg text-xs font-bold text-[#1E331B] disabled:opacity-40 cursor-pointer"
+                >
+                  Prev
+                </button>
+                <button
+                  onClick={() => setDrillDownPage(p => p + 1)}
+                  disabled={drillDownPage >= Math.ceil(filteredDrillDownData.length / drillDownRowsPerPage)}
+                  className="px-3 py-1 bg-white border border-[#D6CAA8] rounded-lg text-xs font-bold text-[#1E331B] disabled:opacity-40 cursor-pointer"
+                >
+                  Next
+                </button>
+              </div>
+            </div>
+
           </div>
         </div>
-      </div>
+      )}
 
     </div>
   );
