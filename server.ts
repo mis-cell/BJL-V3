@@ -8,15 +8,30 @@ import nodemailer from "nodemailer";
 import imaps from 'imap-simple';
 import { simpleParser } from 'mailparser';
 import { createClient } from '@supabase/supabase-js';
-
-const supabaseUrl = 'https://lxuapkccxaadwixjpirs.supabase.co';
-const supabaseAnonKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imx4dWFwa2NjeGFhZHdpeGpwaXJzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzg4MzQ4NDksImV4cCI6MjA5NDQxMDg0OX0.rzjJFNOb1gx0Z4cMSfkW9yDe4rI8oO6TLTzcVXswPek';
-const supabase = createClient(supabaseUrl, supabaseAnonKey);
-
-
-
+import pg from 'pg';
 
 dotenv.config();
+
+const { Pool } = pg;
+const pgPool = new Pool({
+  connectionString: process.env.DATABASE_URL || 'postgresql://postgres:Verified@3656@localhost:5432/bjcl_db',
+  max: 25,
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 6000,
+});
+
+// Test connection on launch
+pgPool.query('SELECT current_database() as db, version() as ver;')
+  .then(res => {
+    console.log(`✅ Connected to local PostgreSQL 18: Database = [${res.rows[0]?.db}]`);
+  })
+  .catch(err => {
+    console.warn(`⚠️ Local PostgreSQL 18 connection notice (${err.message}). Defaulting to available endpoints.`);
+  });
+
+const supabaseUrl = process.env.VITE_SUPABASE_URL || 'https://lxuapkccxaadwixjpirs.supabase.co';
+const supabaseAnonKey = process.env.VITE_SUPABASE_ANON_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imx4dWFwa2NjeGFhZHdpeGpwaXJzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzg4MzQ4NDksImV4cCI6MjA5NDQxMDg0OX0.rzjJFNOb1gx0Z4cMSfkW9yDe4rI8oO6TLTzcVXswPek';
+const supabase = createClient(supabaseUrl, supabaseAnonKey);
 
 // Helper to clean RFC 2047 encoded words if any remain
 function cleanMimeWords(str: string): string {
@@ -258,6 +273,201 @@ async function startServer() {
 
   // System Intelligence Route securely delegated to AI Gateway
   app.use(["/api/chat", "/Jute-Purchase-Automation/api/chat"], aiGatewayRouter);
+
+  // ============================================================================
+  // LOCAL POSTGRESQL 18 (bjcl_db) REST API & QUERY ROUTER
+  // ============================================================================
+  app.get(["/api/pg/health", "/Jute-Purchase-Automation/api/pg/health"], async (req, res) => {
+    try {
+      const result = await pgPool.query("SELECT current_database() as database, NOW() as server_time, version() as version;");
+      return res.json({
+        ok: true,
+        connected: true,
+        database: result.rows[0]?.database || 'bjcl_db',
+        server_time: result.rows[0]?.server_time,
+        version: result.rows[0]?.version
+      });
+    } catch (err: any) {
+      return res.status(500).json({ ok: false, connected: false, error: err.message });
+    }
+  });
+
+  app.post(["/api/pg/query", "/Jute-Purchase-Automation/api/pg/query"], async (req, res) => {
+    const { query, params = [] } = req.body;
+    if (!query) return res.status(400).json({ error: "Missing SQL query in request body" });
+    try {
+      const result = await pgPool.query(query, params);
+      return res.json({ data: result.rows, rowCount: result.rowCount });
+    } catch (err: any) {
+      console.error("[PG Query Error]:", err.message, "SQL:", query);
+      return res.status(500).json({ error: err.message, data: null });
+    }
+  });
+
+  app.post(["/api/pg/rpc", "/Jute-Purchase-Automation/api/pg/rpc"], async (req, res) => {
+    const { name, args = {} } = req.body;
+    if (!name) return res.status(400).json({ error: "Missing RPC function name" });
+    try {
+      if (name === 'exec_sql') {
+        const queryText = args.query;
+        const result = await pgPool.query(queryText);
+        return res.json({ data: result.rows || [], error: null });
+      }
+      if (name === 'exec_sql_return') {
+        const queryText = args.query;
+        const result = await pgPool.query(queryText);
+        return res.json({ data: result.rows || [], error: null });
+      }
+      const keys = Object.keys(args);
+      const placeholders = keys.map((_, i) => `$${i + 1}`).join(', ');
+      const values = keys.map(k => args[k]);
+      const sql = `SELECT * FROM ${name}(${placeholders});`;
+      const result = await pgPool.query(sql, values);
+      return res.json({ data: result.rows, error: null });
+    } catch (err: any) {
+      console.error(`[PG RPC Error in ${name}]:`, err.message);
+      return res.status(500).json({ error: err.message, data: null });
+    }
+  });
+
+  app.post(["/api/pg/crud", "/Jute-Purchase-Automation/api/pg/crud"], async (req, res) => {
+    const { action, table, data, filters = {}, order, ascending = true, limit, offset, idCol } = req.body;
+    if (!table) return res.status(400).json({ error: "Missing table name" });
+
+    try {
+      // 1. SELECT
+      if (action === 'select') {
+        let sql = `SELECT * FROM "${table}"`;
+        const whereClauses: string[] = [];
+        const params: any[] = [];
+
+        Object.keys(filters).forEach((key, idx) => {
+          whereClauses.push(`"${key}" = $${idx + 1}`);
+          params.push(filters[key]);
+        });
+
+        if (whereClauses.length > 0) {
+          sql += ` WHERE ` + whereClauses.join(' AND ');
+        }
+
+        if (order) {
+          sql += ` ORDER BY "${order}" ${ascending ? 'ASC' : 'DESC'}`;
+        }
+
+        if (limit) {
+          params.push(limit);
+          sql += ` LIMIT $${params.length}`;
+        }
+
+        if (offset) {
+          params.push(offset);
+          sql += ` OFFSET $${params.length}`;
+        }
+
+        const result = await pgPool.query(sql, params);
+        return res.json({ data: result.rows, error: null });
+      }
+
+      // 2. INSERT
+      if (action === 'insert') {
+        const rows = Array.isArray(data) ? data : [data];
+        if (rows.length === 0) return res.json({ data: [], error: null });
+
+        const results: any[] = [];
+        for (const row of rows) {
+          const keys = Object.keys(row);
+          const columns = keys.map(k => `"${k}"`).join(', ');
+          const placeholders = keys.map((_, i) => `$${i + 1}`).join(', ');
+          const values = keys.map(k => (typeof row[k] === 'object' && row[k] !== null ? JSON.stringify(row[k]) : row[k]));
+
+          const insertSql = `INSERT INTO "${table}" (${columns}) VALUES (${placeholders}) RETURNING *;`;
+          const result = await pgPool.query(insertSql, values);
+          results.push(result.rows[0]);
+        }
+        return res.json({ data: Array.isArray(data) ? results : results[0], error: null });
+      }
+
+      // 3. UPSERT
+      if (action === 'upsert') {
+        const rows = Array.isArray(data) ? data : [data];
+        if (rows.length === 0) return res.json({ data: [], error: null });
+
+        const results: any[] = [];
+        for (const row of rows) {
+          const keys = Object.keys(row);
+          const columns = keys.map(k => `"${k}"`).join(', ');
+          const placeholders = keys.map((_, i) => `$${i + 1}`).join(', ');
+          const values = keys.map(k => (typeof row[k] === 'object' && row[k] !== null ? JSON.stringify(row[k]) : row[k]));
+          
+          let conflictCol = idCol || keys[0];
+          const updateSets = keys.map(k => `"${k}" = EXCLUDED."${k}"`).join(', ');
+
+          const upsertSql = `
+            INSERT INTO "${table}" (${columns}) 
+            VALUES (${placeholders}) 
+            ON CONFLICT ("${conflictCol}") 
+            DO UPDATE SET ${updateSets} 
+            RETURNING *;
+          `;
+          try {
+            const result = await pgPool.query(upsertSql, values);
+            results.push(result.rows[0]);
+          } catch (e) {
+            // Fallback plain insert
+            const fallbackSql = `INSERT INTO "${table}" (${columns}) VALUES (${placeholders}) RETURNING *;`;
+            const result = await pgPool.query(fallbackSql, values);
+            results.push(result.rows[0]);
+          }
+        }
+        return res.json({ data: Array.isArray(data) ? results : results[0], error: null });
+      }
+
+      // 4. UPDATE
+      if (action === 'update') {
+        const keys = Object.keys(data);
+        if (keys.length === 0) return res.status(400).json({ error: "No update fields provided" });
+
+        const params: any[] = [];
+        const setClauses = keys.map((k, i) => {
+          params.push(typeof data[k] === 'object' && data[k] !== null ? JSON.stringify(data[k]) : data[k]);
+          return `"${k}" = $${i + 1}`;
+        });
+
+        const whereClauses: string[] = [];
+        Object.keys(filters).forEach(k => {
+          params.push(filters[k]);
+          whereClauses.push(`"${k}" = $${params.length}`);
+        });
+
+        const updateSql = `UPDATE "${table}" SET ${setClauses.join(', ')} WHERE ${whereClauses.join(' AND ')} RETURNING *;`;
+        const result = await pgPool.query(updateSql, params);
+        return res.json({ data: result.rows, error: null });
+      }
+
+      // 5. DELETE
+      if (action === 'delete') {
+        const params: any[] = [];
+        const whereClauses: string[] = [];
+        Object.keys(filters).forEach(k => {
+          params.push(filters[k]);
+          whereClauses.push(`"${k}" = $${params.length}`);
+        });
+
+        if (whereClauses.length === 0) {
+          return res.status(400).json({ error: "Refusing to delete without filter conditions" });
+        }
+
+        const deleteSql = `DELETE FROM "${table}" WHERE ${whereClauses.join(' AND ')};`;
+        const result = await pgPool.query(deleteSql, params);
+        return res.json({ success: true, rowCount: result.rowCount, error: null });
+      }
+
+      return res.status(400).json({ error: `Unknown action: ${action}` });
+    } catch (err: any) {
+      console.error(`[PG CRUD Error on ${table} - ${action}]:`, err.message);
+      return res.status(500).json({ error: err.message, data: null });
+    }
+  });
 
   // Send Email Route
   app.post(["/api/send-email", "/Jute-Purchase-Automation/api/send-email"], async (req, res) => {
