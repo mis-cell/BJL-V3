@@ -233,7 +233,7 @@ export const GradeItemPercentageReport: React.FC<GradeItemPercentageReportProps>
                 No moisture records found in current dataset
               </div>
             ) : (
-              <ResponsiveContainer width="100%" height="100%">
+              <ResponsiveContainer width="100%" height="100%" minWidth={100} minHeight={100} debounce={50}>
                 <BarChart data={moistureActualVsStandard} margin={{ top: 10, right: 15, left: -5, bottom: 10 }}>
                   <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
                   <XAxis dataKey="name" tick={{ fontSize: 9, fill: '#64748b' }} />

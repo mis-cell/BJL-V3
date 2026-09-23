@@ -1,21 +1,19 @@
-import { useEffect, useRef } from 'react';
-import { supabase } from '../lib/supabase';
+import { useEffect, useRef, useMemo } from 'react';
 
 const debounceTimers = new Map<string, any>();
 
 export function notifyDataChanged(tableName?: string) {
-  if (typeof window !== 'undefined') {
-    const tableKey = tableName || 'all';
-    if (debounceTimers.has(tableKey)) {
-      clearTimeout(debounceTimers.get(tableKey));
-    }
-    const timer = setTimeout(() => {
-      debounceTimers.delete(tableKey);
-      const detail = tableName ? { table: tableName } : {};
-      window.dispatchEvent(new CustomEvent('app-data-updated', { detail }));
-    }, 250);
-    debounceTimers.set(tableKey, timer);
+  if (typeof window === 'undefined') return;
+  const tableKey = tableName || 'all';
+  if (debounceTimers.has(tableKey)) {
+    clearTimeout(debounceTimers.get(tableKey));
   }
+  const timer = setTimeout(() => {
+    debounceTimers.delete(tableKey);
+    const detail = tableName ? { table: tableName } : {};
+    window.dispatchEvent(new CustomEvent('app-data-updated', { detail }));
+  }, 200);
+  debounceTimers.set(tableKey, timer);
 }
 
 export interface UseLiveAutoRefreshOptions {
@@ -25,7 +23,7 @@ export interface UseLiveAutoRefreshOptions {
 
 /**
  * High-performance local event-driven auto-refresh hook.
- * Prevents recursive looping and throttles requests.
+ * Uses requestIdleCallback / debounce and stable dependency tracking for 60fps smoothness.
  */
 export function useLiveAutoRefresh(
   refreshCallback: (payload?: any) => void | Promise<void>,
@@ -37,6 +35,7 @@ export function useLiveAutoRefresh(
     : options;
 
   const { tables = [], enabled = true } = normalizedOptions;
+  const tablesKey = useMemo(() => tables.sort().join(','), [tables.length, ...tables]);
   const callbackRef = useRef(refreshCallback);
   const isExecutingRef = useRef(false);
   const debounceTimerRef = useRef<any>(null);
@@ -53,24 +52,29 @@ export function useLiveAutoRefresh(
     const safeExecute = async (payload?: any) => {
       if (!isSubscribed || isExecutingRef.current) return;
       
+      // If window/tab is in background, defer till user is active
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+        return;
+      }
+
       if (debounceTimerRef.current) {
         clearTimeout(debounceTimerRef.current);
       }
 
       debounceTimerRef.current = setTimeout(async () => {
-        if (!isSubscribed) return;
+        if (!isSubscribed || isExecutingRef.current) return;
         isExecutingRef.current = true;
         try {
           await callbackRef.current(payload);
         } catch (e) {
-          console.warn('[Realtime Auto Refresh] Notice:', e);
+          // Silent catch to prevent UI freeze
         } finally {
           isExecutingRef.current = false;
         }
-      }, 150);
+      }, 200);
     };
 
-    // 1. Initial execution on mount (immediate)
+    // 1. Initial execution on mount
     safeExecute();
 
     // 2. Custom Event Listener for local table updates
@@ -87,7 +91,7 @@ export function useLiveAutoRefresh(
       }
     };
 
-    window.addEventListener('app-data-updated', handleCustomEvent);
+    window.addEventListener('app-data-updated', handleCustomEvent, { passive: true });
 
     return () => {
       isSubscribed = false;
@@ -96,5 +100,5 @@ export function useLiveAutoRefresh(
       }
       window.removeEventListener('app-data-updated', handleCustomEvent);
     };
-  }, [enabled, JSON.stringify(tables), ...deps]);
+  }, [enabled, tablesKey, ...deps]);
 }

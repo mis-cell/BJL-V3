@@ -47,7 +47,7 @@ export const ScatterPlotChart: React.FC<ScatterPlotChartProps> = ({
       </div>
 
       <div style={{ width: '100%', height }}>
-        <ResponsiveContainer width="100%" height="100%">
+        <ResponsiveContainer width="100%" height="100%" minWidth={100} minHeight={100} debounce={50}>
           <ScatterChart margin={{ top: 15, right: 20, bottom: 20, left: 10 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
             <XAxis 

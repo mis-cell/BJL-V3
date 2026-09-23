@@ -318,18 +318,6 @@ async function startServer() {
   // 2. Body Parser
   app.use(express.json({ limit: "50mb" }));
 
-  app.use((req, res, next) => {
-    const logLine = `[${new Date().toISOString()}] ${req.method} ${req.url} ${req.originalUrl}\n`;
-    try {
-      fs.appendFileSync(path.join(process.cwd(), "requests.log"), logLine);
-    } catch (e) {}
-    console.log("Incoming request:", req.method, req.url, req.originalUrl);
-    next();
-  });
- // Support large pdf payloads
-
-  console.log("Environment:", process.env.NODE_ENV || "development");
-
   // System Intelligence Route securely delegated to AI Gateway
   app.use(["/api/chat", "/Jute-Purchase-Automation/api/chat"], aiGatewayRouter);
 

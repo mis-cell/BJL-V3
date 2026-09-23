@@ -297,15 +297,9 @@ export default function ExecutiveBiDashboard({
     const activeSuppliersCount = uniqueSuppliers.length || (list.length > 0 ? new Set(list.map(l => l.supplier_name || l.supplier)).size : 24);
     const activeBrokersCount = uniqueBrokers.length || (list.length > 0 ? new Set(list.map(l => l.broker_name || l.broker)).size : 18);
 
-    // 7. Sauda Check Point & PTF Breakdown Analytics
-    // Sourced directly from Sauda Check Point (`sauda_check_point` & `sauda_check_point_details`)
-    // Categorized into:
-    // 1. P.T.F Entries (is_ptf === true || ptf_no is present || po_type === 'PTF')
-    // 2. Sauda Linked Entries (regular Saudas entered in Check Point)
-    // 3. Total Combined Sum
-    const scpSourceList = (saudaCheckPoints && saudaCheckPoints.length > 0)
-      ? saudaCheckPoints
-      : ((pos && pos.length > 0) ? pos : saudas);
+    // 7. Sauda Check Point & Final P.O Breakdown Analytics
+    // CARD 1: Total Contracts = Sauda Check Point (`sauda_check_point`) + Final P.O (`purchase_master` / `pos`)
+    // CARD 2: Pending Sauda = Sauda Check Point (`sauda_check_point`) strictly where status is Pending
 
     const scpDetailsList = saudaCheckPointDetails || [];
     const detailsByPo: Record<string, any[]> = {};
@@ -316,37 +310,17 @@ export default function ExecutiveBiDashboard({
       detailsByPo[k].push(d);
     });
 
-    let ptfCount = 0;
-    let ptfWeight = 0;
-    let ptfValue = 0;
-    let ptfBales = 0;
-    let ptfPendingCount = 0;
-    let ptfPendingWeight = 0;
-    let ptfPendingValue = 0;
-    const ptfSuppliers = new Set<string>();
-    const ptfBrokers = new Set<string>();
+    const isPtfRow = (r: any) => Boolean(
+      r.is_ptf ||
+      (r.ptf_no && String(r.ptf_no).trim() && String(r.ptf_no).trim().toUpperCase() !== 'N/A') ||
+      String(r.po_type || '').toUpperCase() === 'PTF' ||
+      String(r.po_identification || '').toUpperCase() === 'PTF' ||
+      String(r.po_no || '').trim().toUpperCase().startsWith('PTF') ||
+      String(r.po_no || '').trim().toUpperCase().includes('(PTF)') ||
+      String(r.ptf_no || '').trim().toUpperCase().includes('(PTF)')
+    );
 
-    let scpSaudaCount = 0;
-    let scpSaudaWeight = 0;
-    let scpSaudaValue = 0;
-    let scpSaudaBales = 0;
-    let scpSaudaPendingCount = 0;
-    let scpSaudaPendingWeight = 0;
-    let scpSaudaPendingValue = 0;
-    const scpSaudaSuppliers = new Set<string>();
-    const scpSaudaBrokers = new Set<string>();
-
-    scpSourceList.forEach((r: any) => {
-      const isPtf = Boolean(
-        r.is_ptf ||
-        (r.ptf_no && String(r.ptf_no).trim() && String(r.ptf_no).trim().toUpperCase() !== 'N/A') ||
-        String(r.po_type || '').toUpperCase() === 'PTF' ||
-        String(r.po_identification || '').toUpperCase() === 'PTF' ||
-        String(r.po_no || '').trim().toUpperCase().startsWith('PTF') ||
-        String(r.po_no || '').trim().toUpperCase().includes('(PTF)') ||
-        String(r.ptf_no || '').trim().toUpperCase().includes('(PTF)')
-      );
-
+    const getRowMetrics = (r: any) => {
       const poKey = String(r.po_no || r.ptf_no || '').trim().toUpperCase();
       const poDetails = detailsByPo[poKey] || [];
 
@@ -366,11 +340,48 @@ export default function ExecutiveBiDashboard({
       const qty = detQty > 0 ? detQty : (Number(r.total_units || r.units_per_lorry || r.packets || r.bales || 0) || 0);
       const baseRate = Number(r.b_rate || r.rate || 5800);
       const val = detVal > 0 ? detVal : (Number(r.total_contract_value || r.total_value || r.amount || 0) || (wt * 10 * (baseRate > 0 ? baseRate : 5800)));
-
       const sup = r.supplier || r.supplier_name || r.challan_supplier;
       const brk = r.broker || r.broker_name;
 
-      const isPending = r.pending !== false && String(r.status || '').toLowerCase() !== 'final' && String(r.status || '').toLowerCase() !== 'completed';
+      return { wt, qty, val, sup, brk };
+    };
+
+    // --- CARD 1: TOTAL ALL CONTRACTS (SAUDA CHECK POINT + FINAL P.O) ---
+    const contractMap = new Map<string, any>();
+    (saudaCheckPoints || []).forEach((r: any) => {
+      const k = String(r.po_no || r.ptf_no || r.sauda_no || r.id || '').trim().toUpperCase();
+      if (k) contractMap.set(k, { ...r, _source: 'sauda_check_point' });
+    });
+    (pos || []).forEach((r: any) => {
+      const k = String(r.po_no || r.ptf_no || r.contract_po_no || r.sauda_no || r.id || '').trim().toUpperCase();
+      if (k) {
+        const existing = contractMap.get(k) || {};
+        contractMap.set(k, { ...existing, ...r, _source: 'purchase_master', _inFinalPo: true });
+      }
+    });
+
+    let totalContractsList = Array.from(contractMap.values());
+    if (totalContractsList.length === 0 && saudas && saudas.length > 0) {
+      totalContractsList = saudas;
+    }
+
+    let ptfCount = 0;
+    let ptfWeight = 0;
+    let ptfValue = 0;
+    let ptfBales = 0;
+    const ptfSuppliers = new Set<string>();
+    const ptfBrokers = new Set<string>();
+
+    let scpSaudaCount = 0;
+    let scpSaudaWeight = 0;
+    let scpSaudaValue = 0;
+    let scpSaudaBales = 0;
+    const scpSaudaSuppliers = new Set<string>();
+    const scpSaudaBrokers = new Set<string>();
+
+    totalContractsList.forEach((r: any) => {
+      const isPtf = isPtfRow(r);
+      const { wt, qty, val, sup, brk } = getRowMetrics(r);
 
       if (isPtf) {
         ptfCount++;
@@ -379,12 +390,6 @@ export default function ExecutiveBiDashboard({
         ptfBales += qty;
         if (sup) ptfSuppliers.add(String(sup).trim());
         if (brk) ptfBrokers.add(String(brk).trim());
-
-        if (isPending) {
-          ptfPendingCount++;
-          ptfPendingWeight += wt;
-          ptfPendingValue += val;
-        }
       } else {
         scpSaudaCount++;
         scpSaudaWeight += wt;
@@ -392,31 +397,60 @@ export default function ExecutiveBiDashboard({
         scpSaudaBales += qty;
         if (sup) scpSaudaSuppliers.add(String(sup).trim());
         if (brk) scpSaudaBrokers.add(String(brk).trim());
-
-        if (isPending) {
-          scpSaudaPendingCount++;
-          scpSaudaPendingWeight += wt;
-          scpSaudaPendingValue += val;
-        }
       }
     });
 
-    // Fallback if scpSourceList has no records
-    if (ptfCount === 0 && scpSaudaCount === 0 && saudas.length > 0) {
-      saudas.forEach((s: any) => {
-        const wt = Number(s.total_wt_in_ton || s.contract_mt || 0);
-        const rate = Number(s.b_rate || s.rate || 5800);
-        const val = Number(s.total_value || 0) || (wt * 10 * rate);
-        const qty = Number(s.total_units || s.bales || Math.round(wt * 10 * 0.55));
-        scpSaudaCount++;
-        scpSaudaWeight += wt;
-        scpSaudaValue += val;
-        scpSaudaBales += qty;
+    // --- CARD 2: PENDING SAUDA (SAUDA CHECK POINT ONLY WHERE STATUS IS PENDING) ---
+    const finalizedPoSet = new Set(
+      (pos || [])
+        .map((p: any) => String(p.po_no || p.ptf_no || p.contract_po_no || '').trim().toUpperCase())
+        .filter(Boolean)
+    );
+
+    const pendingScpRows = (saudaCheckPoints || []).filter((r: any) => {
+      const k = String(r.po_no || r.ptf_no || r.sauda_no || '').trim().toUpperCase();
+      const statusStr = String(r.status || '').trim().toLowerCase();
+      const pendingStr = String(r.pending ?? '').trim().toLowerCase();
+
+      // If already finalized or moved to Final P.O table, it is not pending in Check Point
+      if (k && finalizedPoSet.has(k)) return false;
+
+      // Status check:
+      if (statusStr === 'final' || statusStr === 'moved_to_final' || statusStr === 'completed' || statusStr === 'settled' || statusStr === 'closed' || statusStr.includes('passed to final')) {
+        return false;
+      }
+      if (pendingStr === 'no' || pendingStr === 'false' || r.pending === false || r.pending === 0) {
+        return false;
+      }
+      return true;
+    });
+
+    let ptfPendingCount = 0;
+    let ptfPendingWeight = 0;
+    let ptfPendingValue = 0;
+    let ptfPendingBales = 0;
+
+    let scpSaudaPendingCount = 0;
+    let scpSaudaPendingWeight = 0;
+    let scpSaudaPendingValue = 0;
+    let scpSaudaPendingBales = 0;
+
+    pendingScpRows.forEach((r: any) => {
+      const isPtf = isPtfRow(r);
+      const { wt, qty, val } = getRowMetrics(r);
+
+      if (isPtf) {
+        ptfPendingCount++;
+        ptfPendingWeight += wt;
+        ptfPendingValue += val;
+        ptfPendingBales += qty;
+      } else {
         scpSaudaPendingCount++;
         scpSaudaPendingWeight += wt;
         scpSaudaPendingValue += val;
-      });
-    }
+        scpSaudaPendingBales += qty;
+      }
+    });
 
     const totalScpCount = ptfCount + scpSaudaCount;
     const totalScpWeight = Number((ptfWeight + scpSaudaWeight).toFixed(2));
@@ -441,7 +475,7 @@ export default function ExecutiveBiDashboard({
     const totalScpBrokersCount = new Set([...ptfBrokers, ...scpSaudaBrokers]).size;
 
     let latestSaudaDate = "N/A";
-    const allDateSources = [...scpSourceList, ...saudas];
+    const allDateSources = [...totalContractsList, ...saudas];
     if (allDateSources.length > 0) {
       const sortedDates = allDateSources
         .map(s => s.date || s.b_date || s.po_date || s.created_at)
@@ -479,23 +513,25 @@ export default function ExecutiveBiDashboard({
     if (activePayments.length > 0) {
       activePayments.forEach((p: any) => {
         // Payable Net Amount (₹)
-        const payableVal = Number(p.payable_amt) || Number(p.total_amount) || Number(p.net_amt) || Number(p.value_amt) || 0;
-        totalPaymentAmt += payableVal;
+        const payableVal = Number(p.payable_amt ?? p.total_amount ?? p.net_amt ?? p.value_amt ?? 0);
+        totalPaymentAmt += (payableVal > 0 ? payableVal : Number(p.paid_amount || 0));
 
         // Paid Amount (₹)
         const paidVal = Number(p.paid_amount || 0);
         advancePaymentAmt += paidVal;
 
         // Pending Amount (₹)
-        const pendingVal = payableVal - paidVal;
-        if (pendingVal > 0) {
-          restPaymentAmt += pendingVal;
+        const pendingVal = Math.max(0, payableVal - paidVal);
+        const status = String(p.status || p.payment_status || '').toLowerCase().trim();
+        const isCleared = status === 'completed' || status === 'paid' || (payableVal > 0 && paidVal >= payableVal - 0.5);
+
+        if (isCleared) {
+          paidVouchersCount++;
+        } else if (pendingVal > 0.5 || status === 'pending' || status === 'partially_paid') {
           pendingVouchersCount++;
         }
 
-        if (paidVal > 0) {
-          paidVouchersCount++;
-        }
+        restPaymentAmt += (isCleared ? 0 : pendingVal);
       });
     }
 

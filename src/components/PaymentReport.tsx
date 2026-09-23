@@ -2517,20 +2517,29 @@ export default function PaymentReport({ onClose }: { onClose?: () => void }) {
   });
 
   // Calculate totals for dashboard summary cards
-  const totalPaidSum = paymentList.reduce((sum, p) => sum + (Number(p.paid_amount || p.total_amount || 0)), 0);
-  const totalPayableSum = paymentList.reduce((sum, p) => sum + (Number(p.payable_amt || p.total_amount || 0)), 0);
+  const totalPaidSum = paymentList.reduce((sum, p) => sum + Number(p.paid_amount || 0), 0);
+  const totalPayableSum = paymentList.reduce((sum, p) => sum + (Number(p.payable_amt ?? p.total_amount ?? 0)), 0);
   const totalPendingSum = paymentList.reduce((sum, p) => {
-    const payable = Number(p.payable_amt || p.total_amount || 0);
+    const payable = Number(p.payable_amt ?? p.total_amount ?? 0);
     const paid = Number(p.paid_amount || 0);
-    const pending = payable - paid;
-    return sum + (pending > 0 ? pending : 0);
+    const pending = Math.max(0, payable - paid);
+    return sum + pending;
   }, 0);
 
-  const completedCount = paymentList.filter(p => (p.status || p.payment_status || '').toLowerCase() === 'completed' || (p.status || p.payment_status || '').toLowerCase() === 'paid').length;
-  const pendingCount = paymentList.filter(p => {
-    const payable = Number(p.payable_amt || p.total_amount || 0);
+  const completedCount = paymentList.filter(p => {
+    const payable = Number(p.payable_amt ?? p.total_amount ?? 0);
     const paid = Number(p.paid_amount || 0);
-    return (payable - paid) > 0 || (p.status || p.payment_status || '').toLowerCase() === 'pending';
+    const status = String(p.status || p.payment_status || '').toLowerCase().trim();
+    if (status === 'completed' || status === 'paid') return true;
+    return payable > 0 && paid >= (payable - 0.5);
+  }).length;
+
+  const pendingCount = paymentList.filter(p => {
+    const payable = Number(p.payable_amt ?? p.total_amount ?? 0);
+    const paid = Number(p.paid_amount || 0);
+    const status = String(p.status || p.payment_status || '').toLowerCase().trim();
+    if (status === 'completed' || status === 'paid') return false;
+    return (payable - paid) > 0.5 || status === 'pending' || status === 'partially_paid';
   }).length;
 
   // Party Ledger Calculations

@@ -408,7 +408,7 @@ export const BrokerPercentageReport: React.FC<BrokerPercentageReportProps> = ({ 
             </span>
           </div>
           <div className="h-56 w-full">
-            <ResponsiveContainer width="100%" height="100%">
+            <ResponsiveContainer width="100%" height="100%" minWidth={100} minHeight={100} debounce={50}>
               <BarChart layout="vertical" data={deliveryBarData} margin={{ top: 5, right: 15, left: 10, bottom: 5 }}>
                 <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="#f1f5f9" />
                 <XAxis type="number" tick={{ fontSize: 9, fill: '#64748b' }} />
@@ -437,7 +437,7 @@ export const BrokerPercentageReport: React.FC<BrokerPercentageReportProps> = ({ 
             </span>
           </div>
           <div className="h-56 w-full">
-            <ResponsiveContainer width="100%" height="100%">
+            <ResponsiveContainer width="100%" height="100%" minWidth={100} minHeight={100} debounce={50}>
               <BarChart data={saudaStatusData} margin={{ top: 5, right: 10, left: -10, bottom: 5 }}>
                 <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
                 <XAxis dataKey="name" tick={{ fontSize: 9, fill: '#334155', fontWeight: 600 }} />
@@ -466,7 +466,7 @@ export const BrokerPercentageReport: React.FC<BrokerPercentageReportProps> = ({ 
             </span>
           </div>
           <div className="h-56 w-full">
-            <ResponsiveContainer width="100%" height="100%">
+            <ResponsiveContainer width="100%" height="100%" minWidth={100} minHeight={100} debounce={50}>
               <PieChart>
                 <Pie
                   data={financialFunnelData}

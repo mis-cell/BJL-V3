@@ -172,7 +172,7 @@ export const AreaPercentageReport: React.FC<AreaPercentageReportProps> = ({ area
           </div>
 
           <div className="h-64 w-full">
-            <ResponsiveContainer width="100%" height="100%">
+            <ResponsiveContainer width="100%" height="100%" minWidth={100} minHeight={100} debounce={50}>
               <BarChart layout="vertical" data={areaShareRankData} margin={{ top: 10, right: 25, left: 15, bottom: 10 }}>
                 <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="#f1f5f9" />
                 <XAxis type="number" tick={{ fontSize: 9, fill: '#64748b' }} tickFormatter={v => `${v}%`} />

@@ -1,21 +1,40 @@
 // ============================================================================
-// 100% LOCAL NATIVE POSTGRESQL 18 CLIENT (bjcl_db) - PERMANENT ADAPTER
+// 100% LOCAL NATIVE POSTGRESQL 18 CLIENT (bjcl_db) - HIGH PERFORMANCE ADAPTER
 // ============================================================================
 
 import { getApiUrl } from './utils';
+
+// High-speed RAM Query Cache & Request Deduplication
+interface CacheEntry {
+  data: any;
+  timestamp: number;
+}
+const queryCache = new Map<string, CacheEntry>();
+const inFlightRequests = new Map<string, Promise<any>>();
+const CACHE_TTL_MS = 3000; // 3 seconds ultra-fast SWR cache
+
+function invalidateTableCache(table: string) {
+  for (const key of queryCache.keys()) {
+    if (key.startsWith(`${table}:`) || key === table) {
+      queryCache.delete(key);
+    }
+  }
+}
 
 // Central debounced event dispatcher to prevent socket resource exhaustion
 const updateDebounceTimers = new Map<string, any>();
 
 function dispatchTableUpdated(table: string) {
   if (typeof window === 'undefined') return;
+  invalidateTableCache(table);
+  
   if (updateDebounceTimers.has(table)) {
     clearTimeout(updateDebounceTimers.get(table));
   }
   const timer = setTimeout(() => {
     updateDebounceTimers.delete(table);
     window.dispatchEvent(new CustomEvent('app-data-updated', { detail: { table } }));
-  }, 350);
+  }, 250);
   updateDebounceTimers.set(table, timer);
 }
 
@@ -209,8 +228,64 @@ export class LocalPgQueryBuilder {
     return this;
   }
 
+  private getCacheKey(): string {
+    return `${this.table}:${JSON.stringify(this.filters)}:${JSON.stringify(this.complexFilters)}:${this.orderCol || ''}:${this.ascending}:${this.limitCount || ''}:${this.offsetCount || ''}`;
+  }
+
   async then(resolve: (res: { data: any; error: any; count?: number }) => void, reject?: (err: any) => void) {
     try {
+      // 1. If this is a SELECT query, check RAM Cache first (0ms latency)
+      if (this.action === 'select') {
+        const cacheKey = this.getCacheKey();
+        const cached = queryCache.get(cacheKey);
+        if (cached && (Date.now() - cached.timestamp < CACHE_TTL_MS)) {
+          let cachedData = cached.data;
+          if (this.wantsSingle || this.wantsMaybeSingle) {
+            cachedData = Array.isArray(cachedData) ? (cachedData.length > 0 ? cachedData[0] : null) : cachedData;
+          }
+          resolve({ data: cachedData, error: null, count: Array.isArray(cachedData) ? cachedData.length : 1 });
+          return;
+        }
+
+        // 2. Request Coalescing (Deduplicate in-flight identical queries)
+        let promise = inFlightRequests.get(cacheKey);
+        if (!promise) {
+          promise = (async () => {
+            const res = await fetch(getApiUrl('/api/pg/crud'), {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                action: 'select',
+                table: this.table,
+                data: null,
+                filters: this.filters,
+                complexFilters: this.complexFilters,
+                order: this.orderCol,
+                ascending: this.ascending,
+                limit: this.limitCount,
+                offset: this.offsetCount,
+                idCol: this.idCol
+              })
+            });
+            const json = await res.json().catch(() => ({ data: [], error: null }));
+            const rows = Array.isArray(json.data) ? json.data : (json.data ? [json.data] : []);
+            queryCache.set(cacheKey, { data: rows, timestamp: Date.now() });
+            return rows;
+          })();
+          inFlightRequests.set(cacheKey, promise);
+          promise.finally(() => inFlightRequests.delete(cacheKey));
+        }
+
+        const rows = await promise;
+        let data = rows;
+        if (this.wantsSingle || this.wantsMaybeSingle) {
+          data = Array.isArray(data) ? (data.length > 0 ? data[0] : null) : data;
+        }
+        resolve({ data, error: null, count: Array.isArray(data) ? data.length : 1 });
+        return;
+      }
+
+      // 3. For MUTATIONS (insert, update, delete, upsert), execute & invalidate cache
       const res = await fetch(getApiUrl('/api/pg/crud'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -235,18 +310,15 @@ export class LocalPgQueryBuilder {
       }
 
       let data = json.data ?? [];
-      if (this.wantsSingle) {
-        data = Array.isArray(data) ? (data.length > 0 ? data[0] : null) : data;
-      } else if (this.wantsMaybeSingle) {
+      if (this.wantsSingle || this.wantsMaybeSingle) {
         data = Array.isArray(data) ? (data.length > 0 ? data[0] : null) : data;
       } else {
         data = Array.isArray(data) ? data : (data ? [data] : []);
       }
 
-      // Notify other views if state modified with debouncing
-      if (this.action !== 'select') {
-        dispatchTableUpdated(this.table);
-      }
+      // Invalidate cache and notify other components
+      invalidateTableCache(this.table);
+      dispatchTableUpdated(this.table);
 
       resolve({ data, error: null, count: Array.isArray(data) ? data.length : 1 });
     } catch (err: any) {
@@ -326,4 +398,4 @@ export const supabase: any = {
 export const getSupabase = () => supabase;
 export const isConfigured = true;
 
-console.log("🔒 [100% LOCAL ARCHITECTURE] Bally Jute ERP running on Local PostgreSQL 18 (bjcl_db).");
+console.log("⚡ [TURBO SPEED] Bally Jute ERP running on Accelerated Local PostgreSQL Engine.");

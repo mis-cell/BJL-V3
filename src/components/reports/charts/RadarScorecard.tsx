@@ -38,7 +38,7 @@ export const RadarScorecard: React.FC<RadarScorecardProps> = ({
       </div>
 
       <div style={{ width: '100%', height }}>
-        <ResponsiveContainer width="100%" height="100%">
+        <ResponsiveContainer width="100%" height="100%" minWidth={100} minHeight={100} debounce={50}>
           <RadarChart cx="50%" cy="50%" outerRadius="75%" data={data}>
             <PolarGrid stroke="#e2e8f0" />
             <PolarAngleAxis dataKey="subject" tick={{ fontSize: 9, fill: '#475569', fontWeight: 600 }} />

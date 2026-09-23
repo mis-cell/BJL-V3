@@ -44,7 +44,7 @@ export const StackedHundredBarChart: React.FC<StackedHundredBarChartProps> = ({
       )}
 
       <div style={{ width: '100%', height }}>
-        <ResponsiveContainer width="100%" height="100%">
+        <ResponsiveContainer width="100%" height="100%" minWidth={100} minHeight={100} debounce={50}>
           {layout === 'vertical' ? (
             <BarChart layout="vertical" data={data} margin={{ top: 10, right: 25, left: 10, bottom: 10 }}>
               <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="#f1f5f9" />

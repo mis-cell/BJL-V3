@@ -292,7 +292,8 @@ export default function Dashboard({
         mimRes,
         midRes,
         scpRes,
-        scpDetRes
+        scpDetRes,
+        poDetRes
       ] = await Promise.all([
         dbModule.fetchAll('temporary_material_received', 'created_at', false).catch(() => []),
         dbModule.fetchAll('sauda_master', 'created_at', false).catch(() => []),
@@ -384,6 +385,17 @@ export default function Dashboard({
               if (r.data) return r.data;
             }
             return await dbModule.fetchAll('sauda_check_point_details').catch(() => []);
+          } catch (e) {
+            return [];
+          }
+        })(),
+        (async () => {
+          try {
+            if (supabase) {
+              const r = await supabase.from('purchase_detail_master').select('*');
+              if (r.data) return r.data;
+            }
+            return await dbModule.fetchAll('purchase_detail_master').catch(() => []);
           } catch (e) {
             return [];
           }
@@ -600,15 +612,20 @@ export default function Dashboard({
       
       const pendingCount = hasPm 
         ? pmList.filter((s: any) => {
-            const st = (s.status || s.payment_status || 'pending').toLowerCase().trim();
-            return st === 'pending' || st === 'draft';
+            const payable = Number(s.payable_amt ?? s.total_amount ?? 0);
+            const paid = Number(s.paid_amount || 0);
+            const st = String(s.status || s.payment_status || '').toLowerCase().trim();
+            if (st === 'completed' || st === 'paid' || (payable > 0 && paid >= payable - 0.5)) return false;
+            return (payable - paid) > 0.5 || st === 'pending' || st === 'draft' || st === 'partially_paid';
           }).length
         : settlements.filter((s: any) => (s.payment_status || 'Pending').toLowerCase().trim() === 'pending').length;
 
       const settledCount = hasPm
         ? pmList.filter((s: any) => {
-            const st = (s.status || s.payment_status || '').toLowerCase().trim();
-            return st === 'completed' || st === 'paid' || st === 'settled';
+            const payable = Number(s.payable_amt ?? s.total_amount ?? 0);
+            const paid = Number(s.paid_amount || 0);
+            const st = String(s.status || s.payment_status || '').toLowerCase().trim();
+            return st === 'completed' || st === 'paid' || st === 'settled' || (payable > 0 && paid >= payable - 0.5);
           }).length
         : settlements.filter((s: any) => {
             const st = (s.payment_status || '').toLowerCase().trim();
@@ -617,8 +634,11 @@ export default function Dashboard({
 
       const partiallyPaidCount = hasPm
         ? pmList.filter((s: any) => {
-            const st = (s.status || s.payment_status || '').toLowerCase().trim();
-            return st === 'partial' || st === 'partially paid';
+            const payable = Number(s.payable_amt ?? s.total_amount ?? 0);
+            const paid = Number(s.paid_amount || 0);
+            const st = String(s.status || s.payment_status || '').toLowerCase().trim();
+            if (st === 'completed' || st === 'paid' || (payable > 0 && paid >= payable - 0.5)) return false;
+            return paid > 0 && (payable - paid) > 0.5;
           }).length
         : settlements.filter((s: any) => (s.payment_status || '').toLowerCase().trim() === 'partially paid').length;
       
@@ -639,7 +659,7 @@ export default function Dashboard({
       setRawPos(pos || []);
       setRawSaudas(saudas || []);
       setRawScp(scpRes || []);
-      setRawScpDetails(scpDetRes || []);
+      setRawScpDetails([...(scpDetRes || []), ...(poDetRes || [])]);
       setPayments(pmList || []);
 
       // Direct queries to custom Views / Tables: amad_register, material_inspection, and sauda_master in Supabase
