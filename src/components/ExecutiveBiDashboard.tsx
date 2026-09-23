@@ -144,44 +144,13 @@ export default function ExecutiveBiDashboard({
 
   // Dynamic Year Dropdown & Last Sync State
   const [lastSyncTime, setLastSyncTime] = useState<string>(() => new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit' }));
-  const [serverSummary, setServerSummary] = useState<any>(null);
-  const [serverLoading, setServerLoading] = useState(false);
-  const [serverError, setServerError] = useState<string | null>(null);
+  const [showAllMonths, setShowAllMonths] = useState<boolean>(false);
   
-  // Dynamic Year Selection for Month-Wise Summary
-  const [selectedYear, setSelectedYear] = useState<number>(() => new Date().getFullYear());
-
-  // Single-request Server Aggregation RPC Loader
-  const loadServerSummary = async (yr: number) => {
-    setServerLoading(true);
-    setServerError(null);
-    try {
-      const res = await fetch('/api/dashboard/summary', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ year: yr })
-      });
-      if (!res.ok) {
-        throw new Error(`Server returned ${res.status}`);
-      }
-      const data = await res.json();
-      if (data && data.success) {
-        setServerSummary(data);
-        setLastSyncTime(new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit' }));
-      } else {
-        throw new Error(data?.error || 'Failed to aggregate dashboard summary');
-      }
-    } catch (err: any) {
-      console.warn('[Dashboard RPC notice]: using synchronized fallback', err.message);
-      setServerError(err.message || 'Database query failed');
-    } finally {
-      setServerLoading(false);
-    }
-  };
-
   useEffect(() => {
-    loadServerSummary(selectedYear);
-  }, [selectedYear]);
+    if (!loading) {
+      setLastSyncTime(new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit' }));
+    }
+  }, [loading]);
 
   // Card Sub-Toggles (Total / Sauda / P.T.F)
   const [saudaViewMode, setSaudaViewMode] = useState<'all' | 'sauda' | 'ptf'>('all');
@@ -212,9 +181,17 @@ export default function ExecutiveBiDashboard({
   // Colors Palette for Enterprise BI
   const COLORS = ['#1E331B', '#2E6B3E', '#3D8B55', '#4E9F67', '#C5A059', '#15803D', '#059669', '#10B981', '#65A30D'];
 
-  // Helper to extract year safely from date strings
-  const getYearFromDate = (dStr?: string | null): number | null => {
+  // Robust date helpers supporting ISO, DD-MM-YYYY, DD/MM/YYYY, timestamps, etc.
+  const getYearFromDate = (dStr?: string | number | null): number | null => {
     if (!dStr) return null;
+    if (typeof dStr === 'number') {
+      const d = new Date(dStr);
+      if (!isNaN(d.getTime())) {
+        const y = d.getFullYear();
+        if (y >= 2020 && y <= 2040) return y;
+      }
+      return null;
+    }
     const str = String(dStr).trim();
     if (!str || str === 'null' || str === 'undefined' || str === '-') return null;
     try {
@@ -238,9 +215,13 @@ export default function ExecutiveBiDashboard({
     return null;
   };
 
-  // Helper to extract month index (0-11) from date strings
-  const getMonthIndexFromDate = (dStr?: string | null): number | null => {
+  const getMonthIndexFromDate = (dStr?: string | number | null): number | null => {
     if (!dStr) return null;
+    if (typeof dStr === 'number') {
+      const d = new Date(dStr);
+      if (!isNaN(d.getTime())) return d.getMonth();
+      return null;
+    }
     const str = String(dStr).trim();
     if (!str || str === 'null' || str === 'undefined' || str === '-') return null;
     try {
@@ -263,21 +244,18 @@ export default function ExecutiveBiDashboard({
     return null;
   };
 
-  // Dynamically compute all available years from database records + server years
+  // Dynamically compute all available years from database records
   const availableYears = useMemo(() => {
     const yearSet = new Set<number>();
     const currentYear = new Date().getFullYear();
     yearSet.add(currentYear);
 
-    if (serverSummary?.availableYears && Array.isArray(serverSummary.availableYears)) {
-      serverSummary.availableYears.forEach((y: number) => yearSet.add(y));
-    }
-
     const checkRecordYear = (rec: any) => {
       if (!rec) return;
       const candidates = [
-        rec.date, rec.po_date, rec.b_date, rec.payment_date, 
-        rec.created_at, rec.arrival_date, rec.bill_date
+        rec.date, rec.po_date, rec.b_date, rec.sauda_date, rec.contract_date,
+        rec.payment_date, rec.created_at, rec.arrival_date, rec.bill_date,
+        rec.entry_date, rec.issue_date, rec.stock_date, rec.opening_date
       ];
       for (const c of candidates) {
         const y = getYearFromDate(c);
@@ -285,21 +263,52 @@ export default function ExecutiveBiDashboard({
       }
     };
 
-    saudas.forEach(checkRecordYear);
-    saudaCheckPoints.forEach(checkRecordYear);
-    pos.forEach(checkRecordYear);
-    paymentRecords.forEach(checkRecordYear);
-    arrivals.forEach(checkRecordYear);
+    (saudas || []).forEach(checkRecordYear);
+    (saudaCheckPoints || []).forEach(checkRecordYear);
+    (pos || []).forEach(checkRecordYear);
+    (paymentRecords || []).forEach(checkRecordYear);
+    (arrivals || []).forEach(checkRecordYear);
+    (openingStocks || []).forEach(checkRecordYear);
+    (millIssueMasters || []).forEach(checkRecordYear);
 
     return Array.from(yearSet).sort((a, b) => b - a);
-  }, [saudas, saudaCheckPoints, pos, paymentRecords, arrivals, serverSummary]);
+  }, [saudas, saudaCheckPoints, pos, paymentRecords, arrivals, openingStocks, millIssueMasters]);
 
-  // Ensure selectedYear is within availableYears on mount/update
+  // Determine the default year that actually has records
+  const defaultActiveYear = useMemo(() => {
+    const currentYear = new Date().getFullYear();
+    const countRecordsForYear = (yr: number) => {
+      let count = 0;
+      const check = (rec: any) => {
+        if (!rec) return;
+        const candidates = [rec.date, rec.po_date, rec.b_date, rec.payment_date, rec.created_at, rec.arrival_date];
+        for (const c of candidates) {
+          if (getYearFromDate(c) === yr) { count++; break; }
+        }
+      };
+      (saudas || []).forEach(check);
+      (saudaCheckPoints || []).forEach(check);
+      (pos || []).forEach(check);
+      (paymentRecords || []).forEach(check);
+      (arrivals || []).forEach(check);
+      return count;
+    };
+
+    if (countRecordsForYear(currentYear) > 0) return currentYear;
+    for (const yr of availableYears) {
+      if (countRecordsForYear(yr) > 0) return yr;
+    }
+    return availableYears[0] || currentYear;
+  }, [availableYears, saudas, saudaCheckPoints, pos, paymentRecords, arrivals]);
+
+  // Selected Year for Month-Wise Summary (defaults to active year with data)
+  const [selectedYear, setSelectedYear] = useState<number>(defaultActiveYear);
+
   useEffect(() => {
     if (availableYears.length > 0 && !availableYears.includes(selectedYear)) {
-      setSelectedYear(availableYears[0]);
+      setSelectedYear(defaultActiveYear);
     }
-  }, [availableYears, selectedYear]);
+  }, [availableYears, defaultActiveYear]);
 
   // Unified Contract & PO Deduction Helpers
   const isPtfRow = (r: any): boolean => {
@@ -465,63 +474,59 @@ export default function ExecutiveBiDashboard({
     });
 
     const combinedUniquePos = Array.from(uniquePoMap.values());
-    const totalGeneratedPoCount = serverSummary?.summary?.totalGeneratedPo?.totalCount ?? combinedUniquePos.length;
-    let totalGeneratedPoWeight = serverSummary?.summary?.totalGeneratedPo?.totalWeightMT ?? 0;
-    let totalGeneratedPoPendingCount = serverSummary?.summary?.totalGeneratedPo?.pendingCount ?? 0;
-    let totalGeneratedPoCompletedCount = serverSummary?.summary?.totalGeneratedPo?.completedCount ?? 0;
+    const totalGeneratedPoCount = combinedUniquePos.length;
+    let totalGeneratedPoWeight = 0;
+    let totalGeneratedPoPendingCount = 0;
+    let totalGeneratedPoCompletedCount = 0;
 
-    if (!serverSummary?.summary?.totalGeneratedPo) {
-      combinedUniquePos.forEach((p: any) => {
-        const wt = Number(p.total_contract_mt || p.contract_mt || p.total_wt_in_ton || 0) || 0;
-        totalGeneratedPoWeight += wt;
+    combinedUniquePos.forEach((p: any) => {
+      const wt = Number(p.total_contract_mt || p.contract_mt || p.total_wt_in_ton || p.weight_in_ton || 0) || 0;
+      totalGeneratedPoWeight += wt;
 
-        const st = String(p.display_status || p.status || '').toLowerCase().trim();
-        const isPend = p.pending === true || p.pending === 'Yes' || st === 'pending' || st === 'active';
-        if (isPend && st !== 'completed' && st !== 'settled') {
-          totalGeneratedPoPendingCount++;
-        } else {
-          totalGeneratedPoCompletedCount++;
-        }
-      });
-    }
+      const st = String(p.display_status || p.status || '').toLowerCase().trim();
+      const isPend = p.pending === true || p.pending === 'Yes' || p.pending === 'yes' || st === 'pending' || st === 'active';
+      if (isPend && st !== 'completed' && st !== 'settled') {
+        totalGeneratedPoPendingCount++;
+      } else {
+        totalGeneratedPoCompletedCount++;
+      }
+    });
 
     // 4. Payment Module Reconciled Financials (payment_master)
-    let totalPaymentPayableAmt = serverSummary?.summary?.totalPayment?.payableAmt ?? 0;
-    let advancePaymentPaidAmt = serverSummary?.summary?.totalPayment?.advanceAmt ?? 0;
-    let restPaymentPaidAmt = serverSummary?.summary?.totalPayment?.restPaidAmt ?? 0;
-    let totalPaymentPaidAmt = serverSummary?.summary?.totalPayment?.paidAmt ?? 0;
-    let outstandingRestPaymentAmt = serverSummary?.summary?.totalPayment?.outstandingAmt ?? 0;
+    let totalPaymentPayableAmt = 0;
+    let advancePaymentPaidAmt = 0;
+    let restPaymentPaidAmt = 0;
+    let totalPaymentPaidAmt = 0;
+    let outstandingRestPaymentAmt = 0;
 
-    let totalPaymentVouchersCount = serverSummary?.summary?.totalPayment?.totalVouchers ?? 0;
-    let clearedVouchersCount = serverSummary?.summary?.totalPayment?.clearedVouchers ?? 0;
-    let pendingVouchersCount = serverSummary?.summary?.totalPayment?.pendingVouchers ?? 0;
+    let totalPaymentVouchersCount = 0;
+    let clearedVouchersCount = 0;
+    let pendingVouchersCount = 0;
 
-    if (!serverSummary?.summary?.totalPayment) {
-      const activePayments = paymentRecords || [];
-      totalPaymentVouchersCount = activePayments.length;
+    const activePayments = paymentRecords || [];
+    totalPaymentVouchersCount = activePayments.length;
 
-      activePayments.forEach((p: any) => {
-        const payableVal = Number(p.payable_amt ?? p.total_amount ?? p.net_amt ?? 0);
-        const paidVal = Number(p.paid_amount || 0);
-        
-        totalPaymentPayableAmt += (payableVal > 0 ? payableVal : paidVal);
-        totalPaymentPaidAmt += paidVal;
-        advancePaymentPaidAmt += paidVal;
+    activePayments.forEach((p: any) => {
+      const payableVal = Number(p.payable_amt ?? p.total_amount ?? p.net_amt ?? 0);
+      const paidVal = Number(p.paid_amount || p.amount || 0);
+      
+      totalPaymentPayableAmt += (payableVal > 0 ? payableVal : paidVal);
+      totalPaymentPaidAmt += paidVal;
+      advancePaymentPaidAmt += paidVal;
 
-        const restDue = Math.max(0, payableVal - paidVal);
-        const status = String(p.status || p.payment_status || '').toLowerCase().trim();
-        const isCleared = status === 'completed' || status === 'paid' || (payableVal > 0 && paidVal >= payableVal - 0.5);
+      const restDue = Math.max(0, payableVal - paidVal);
+      const status = String(p.status || p.payment_status || '').toLowerCase().trim();
+      const isCleared = status === 'completed' || status === 'paid' || (payableVal > 0 && paidVal >= payableVal - 0.5);
 
-        if (isCleared) {
-          clearedVouchersCount++;
-        } else {
-          outstandingRestPaymentAmt += restDue;
-          if (restDue > 0.5 || status === 'pending' || status === 'partially_paid') {
-            pendingVouchersCount++;
-          }
+      if (isCleared) {
+        clearedVouchersCount++;
+      } else {
+        outstandingRestPaymentAmt += restDue;
+        if (restDue > 0.5 || status === 'pending' || status === 'partially_paid') {
+          pendingVouchersCount++;
         }
-      });
-    }
+      }
+    });
 
     // 5. Godown Stock / Stock Inventory Module Calculation with Unit Conversions (Bales / Drums / MT)
     // 1 Bale = ~180-200 Kgs / 1.8 Quintals / 0.18 MT
@@ -588,16 +593,14 @@ export default function ExecutiveBiDashboard({
       }
     });
 
-    let currentGodownStockBales = serverSummary?.summary?.godownStock?.currentStockBales ?? (totalOpeningBales + totalStockInwardBales - totalStockOutwardBales);
-    let currentGodownStockDrums = serverSummary?.summary?.godownStock?.currentStockDrums ?? (totalOpeningDrums + totalStockInwardDrums - totalStockOutwardDrums);
-    let currentGodownStockMt = serverSummary?.summary?.godownStock?.currentStockMt ?? Number((totalOpeningMt + totalStockInwardMt - totalStockOutwardMt).toFixed(3));
+    let currentGodownStockBales = totalOpeningBales + totalStockInwardBales - totalStockOutwardBales;
+    let currentGodownStockDrums = totalOpeningDrums + totalStockInwardDrums - totalStockOutwardDrums;
+    let currentGodownStockMt = Number((totalOpeningMt + totalStockInwardMt - totalStockOutwardMt).toFixed(3));
 
-    let totalGodownCapacity = serverSummary?.summary?.godownStock?.totalCapacity ?? 0;
-    if (totalGodownCapacity === 0) {
-      (godowns || []).forEach((g: any) => {
-        totalGodownCapacity += Number(g.gdn_capacity || g.capacity || 450);
-      });
-    }
+    let totalGodownCapacity = 0;
+    (godowns || []).forEach((g: any) => {
+      totalGodownCapacity += Number(g.gdn_capacity || g.capacity || 450);
+    });
     if (totalGodownCapacity === 0) totalGodownCapacity = 13200;
 
     // Fallback if stock tables are empty but arrivals exist
@@ -614,29 +617,29 @@ export default function ExecutiveBiDashboard({
       totalArrivalsCount,
       totalWeightMT,
       // Sauda Check Point Card
-      scpTotalCount: serverSummary?.summary?.saudaCheckPoint?.totalCount ?? scpList.length,
-      scpTotalWeightMT: serverSummary?.summary?.saudaCheckPoint?.totalWeightMT ?? Number((scpPtfTotalWeight + scpSaudaTotalWeight).toFixed(2)),
-      scpTotalValueLakhs: serverSummary?.summary?.saudaCheckPoint?.totalValueLakhs ?? Number(((scpPtfTotalValue + scpSaudaTotalValue) / 100000).toFixed(2)),
-      scpPendingCount: serverSummary?.summary?.saudaCheckPoint?.pendingCount ?? scpPendingCount,
-      scpPendingWeightMT: serverSummary?.summary?.saudaCheckPoint?.pendingWeightMT ?? Number(scpPendingWeight.toFixed(2)),
-      scpPendingValueLakhs: serverSummary?.summary?.saudaCheckPoint?.pendingValueLakhs ?? Number((scpPendingValue / 100000).toFixed(2)),
-      scpPassedCount: serverSummary?.summary?.saudaCheckPoint?.passedCount ?? scpPassedCount,
-      scpMismatchCount: serverSummary?.summary?.saudaCheckPoint?.mismatchCount ?? scpMismatchCount,
-      scpCompletedCount: serverSummary?.summary?.saudaCheckPoint?.completedCount ?? scpCompletedCount,
+      scpTotalCount: scpList.length,
+      scpTotalWeightMT: Number((scpPtfTotalWeight + scpSaudaTotalWeight).toFixed(2)),
+      scpTotalValueLakhs: Number(((scpPtfTotalValue + scpSaudaTotalValue) / 100000).toFixed(2)),
+      scpPendingCount,
+      scpPendingWeightMT: Number(scpPendingWeight.toFixed(2)),
+      scpPendingValueLakhs: Number((scpPendingValue / 100000).toFixed(2)),
+      scpPassedCount,
+      scpMismatchCount,
+      scpCompletedCount,
       scpBreakup: {
         ptf: {
-          count: serverSummary?.summary?.saudaCheckPoint?.ptf?.count ?? scpPtfTotalCount,
-          weightMT: serverSummary?.summary?.saudaCheckPoint?.ptf?.weightMT ?? Number(scpPtfTotalWeight.toFixed(2)),
-          valueLakhs: serverSummary?.summary?.saudaCheckPoint?.ptf?.valueLakhs ?? Number((scpPtfTotalValue / 100000).toFixed(2)),
-          pendingCount: serverSummary?.summary?.saudaCheckPoint?.ptf?.pendingCount ?? scpPtfPendingCount,
-          pendingWeightMT: serverSummary?.summary?.saudaCheckPoint?.ptf?.pendingWeightMT ?? Number(scpPtfPendingWeight.toFixed(2))
+          count: scpPtfTotalCount,
+          weightMT: Number(scpPtfTotalWeight.toFixed(2)),
+          valueLakhs: Number((scpPtfTotalValue / 100000).toFixed(2)),
+          pendingCount: scpPtfPendingCount,
+          pendingWeightMT: Number(scpPtfPendingWeight.toFixed(2))
         },
         sauda: {
-          count: serverSummary?.summary?.saudaCheckPoint?.sauda?.count ?? scpSaudaTotalCount,
-          weightMT: serverSummary?.summary?.saudaCheckPoint?.sauda?.weightMT ?? Number(scpSaudaTotalWeight.toFixed(2)),
-          valueLakhs: serverSummary?.summary?.saudaCheckPoint?.sauda?.valueLakhs ?? Number((scpSaudaTotalValue / 100000).toFixed(2)),
-          pendingCount: serverSummary?.summary?.saudaCheckPoint?.sauda?.pendingCount ?? scpSaudaPendingCount,
-          pendingWeightMT: serverSummary?.summary?.saudaCheckPoint?.sauda?.pendingWeightMT ?? Number(scpSaudaPendingWeight.toFixed(2))
+          count: scpSaudaTotalCount,
+          weightMT: Number(scpSaudaTotalWeight.toFixed(2)),
+          valueLakhs: Number((scpSaudaTotalValue / 100000).toFixed(2)),
+          pendingCount: scpSaudaPendingCount,
+          pendingWeightMT: Number(scpSaudaPendingWeight.toFixed(2))
         }
       },
       // Total Generated PO Card
@@ -670,44 +673,16 @@ export default function ExecutiveBiDashboard({
     };
   }, [
     arrivals, saudas, saudaCheckPoints, pos, paymentRecords, 
-    openingStocks, millIssueMasters, millIssueDetails, godowns, serverSummary
+    openingStocks, millIssueMasters, millIssueDetails, godowns
   ]);
 
-  // --- MONTH-WISE SUMMARY CALCULATION (ACCELERATED VIA SERVER RPC OR LOCAL IN-MEMORY) ---
+  // --- MONTH-WISE SUMMARY CALCULATION (DIRECT LOCAL IN-MEMORY) ---
   const monthlySummaryData = useMemo(() => {
-    if (serverSummary?.monthly && Array.isArray(serverSummary.monthly) && serverSummary.year === selectedYear) {
-      return serverSummary.monthly.map((mItem: any) => {
-        const matchingSaudas = metrics.scpList.filter((r: any) => {
-          const y = getYearFromDate(r.date || r.po_date || r.b_date || r.created_at);
-          const m = getMonthIndexFromDate(r.date || r.po_date || r.b_date || r.created_at);
-          return y === selectedYear && m === mItem.monthIndex;
-        });
-        const matchingPendingSaudas = matchingSaudas.filter((r: any) => {
-          const st = String(r.status || '').trim().toLowerCase();
-          const pendStr = String(r.pending ?? '').trim().toLowerCase();
-          return (st === 'pending' || pendStr === 'yes' || pendStr === 'true' || r.pending === true || r.pending === 1) &&
-            (st !== 'passed' && st !== 'approved' && st !== 'final' && st !== 'completed' && st !== 'settled' && st !== 'cancelled' && st !== 'rejected');
-        });
-        const matchingPayments = (paymentRecords || []).filter((p: any) => {
-          const y = getYearFromDate(p.payment_date || p.created_at);
-          const m = getMonthIndexFromDate(p.payment_date || p.created_at);
-          return y === selectedYear && m === mItem.monthIndex;
-        });
-
-        return {
-          ...mItem,
-          matchingSaudas,
-          matchingPendingSaudas,
-          matchingPayments
-        };
-      });
-    }
-
     return MONTH_NAMES.map((monthName, monthIndex) => {
       // 1. Total Contract Sauda created in this month & year
       const matchingSaudas = metrics.scpList.filter((r: any) => {
-        const y = getYearFromDate(r.date || r.po_date || r.b_date || r.created_at);
-        const m = getMonthIndexFromDate(r.date || r.po_date || r.b_date || r.created_at);
+        const y = getYearFromDate(r.date || r.po_date || r.b_date || r.sauda_date || r.contract_date || r.created_at);
+        const m = getMonthIndexFromDate(r.date || r.po_date || r.b_date || r.sauda_date || r.contract_date || r.created_at);
         return y === selectedYear && m === monthIndex;
       });
 
@@ -752,24 +727,23 @@ export default function ExecutiveBiDashboard({
 
       // 3. Total Confirmed Payment by payment transaction date in this month & year
       const matchingPayments = (paymentRecords || []).filter((p: any) => {
-        const y = getYearFromDate(p.payment_date || p.created_at);
-        const m = getMonthIndexFromDate(p.payment_date || p.created_at);
+        const y = getYearFromDate(p.payment_date || p.created_at || p.bill_date);
+        const m = getMonthIndexFromDate(p.payment_date || p.created_at || p.bill_date);
         return y === selectedYear && m === monthIndex;
       });
 
       let monthlyTotalPaid = 0;
+      let monthlyTotalPayable = 0;
       matchingPayments.forEach((p: any) => {
-        monthlyTotalPaid += Number(p.paid_amount || 0);
+        const payableVal = Number(p.payable_amt ?? p.total_amount ?? p.net_amt ?? 0);
+        const paidVal = Number(p.paid_amount || p.amount || 0);
+        monthlyTotalPaid += paidVal;
+        monthlyTotalPayable += (payableVal > 0 ? payableVal : paidVal);
       });
 
       // 4. Monthly Rest Payment (Outstanding Balance for POs / Contracts due in this month)
-      let monthlyRestPayment = 0;
-      matchingPayments.forEach((p: any) => {
-        const payable = Number(p.payable_amt ?? p.total_amount ?? 0);
-        const paid = Number(p.paid_amount || 0);
-        const rest = Math.max(0, payable - paid);
-        monthlyRestPayment += rest;
-      });
+      const monthlyRestPayment = Math.max(0, monthlyTotalPayable - monthlyTotalPaid);
+      const hasData = totalContractsCount > 0 || pendingContractsCount > 0 || monthlyTotalPaid > 0 || monthlyRestPayment > 0;
 
       return {
         monthIndex,
@@ -782,12 +756,13 @@ export default function ExecutiveBiDashboard({
         pendingContractsWeightMT: Number(pendingContractsWeightMT.toFixed(2)),
         monthlyTotalPaid,
         monthlyRestPayment,
+        hasData,
         matchingSaudas,
         matchingPendingSaudas,
         matchingPayments
       };
     });
-  }, [metrics.scpList, paymentRecords, selectedYear, serverSummary]);
+  }, [metrics.scpList, paymentRecords, selectedYear]);
 
   // Open drill-down modal handler
   const openDrillDown = (
@@ -1168,153 +1143,152 @@ export default function ExecutiveBiDashboard({
               <Calendar className="w-5 h-5 text-[#C5A059]" />
             </div>
             <div>
-              <h2 className="text-base font-extrabold text-[#1E331B] font-serif uppercase tracking-wide">
-                Month-Wise Summary
-              </h2>
-              <p className="text-xs text-[#556952]">
-                Detailed Contract, Pending, Payment & Outstanding Balance Breakdown ({selectedYear})
+              <div className="flex items-center gap-2">
+                <h2 className="text-sm sm:text-base font-extrabold text-[#1E331B] font-serif uppercase tracking-wide">
+                  Month-Wise Summary
+                </h2>
+                <span className="px-2 py-0.5 text-[10px] font-bold rounded-full bg-[#EAE2C8] text-[#1E331B]">
+                  {monthlySummaryData.filter(m => showAllMonths || m.hasData).length} {monthlySummaryData.filter(m => showAllMonths || m.hasData).length === 1 ? 'Month' : 'Months'}
+                </span>
+              </div>
+              <p className="text-[11px] text-[#556952]">
+                Contract, Pending, Payment & Outstanding Breakdown ({selectedYear})
               </p>
             </div>
           </div>
 
-          {/* Dynamic Year Dropdown Selector */}
-          <div className="flex items-center gap-2">
-            <label htmlFor="summary_year_select" className="text-xs font-bold text-[#1E331B] uppercase tracking-wider">
-              Year:
-            </label>
-            <div className="relative">
-              <select
-                id="summary_year_select"
-                value={selectedYear}
-                onChange={(e) => setSelectedYear(Number(e.target.value))}
-                className="appearance-none bg-white border-2 border-[#2E6B3E] text-[#1E331B] font-black text-xs px-3.5 py-1.5 pr-8 rounded-xl shadow-xs focus:outline-none focus:ring-2 focus:ring-[#2E6B3E] cursor-pointer"
-              >
-                {availableYears.map((yr) => (
-                  <option key={yr} value={yr}>
-                    {yr}
-                  </option>
-                ))}
-              </select>
-              <ChevronDown className="w-3.5 h-3.5 text-[#2E6B3E] absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+          {/* Controls: Active Months Toggle + Dynamic Year Dropdown */}
+          <div className="flex items-center gap-2.5">
+            <button
+              onClick={() => setShowAllMonths(!showAllMonths)}
+              className={cn(
+                "px-2.5 py-1 text-[11px] font-bold rounded-lg border transition-all cursor-pointer",
+                showAllMonths 
+                  ? "bg-[#2E6B3E] text-white border-[#2E6B3E] shadow-xs" 
+                  : "bg-white text-[#2E6B3E] border-[#D6CAA8] hover:bg-[#FAF7F0]"
+              )}
+            >
+              {showAllMonths ? 'Showing All 12 Months' : 'Active Months Only'}
+            </button>
+
+            <div className="flex items-center gap-1.5">
+              <label htmlFor="summary_year_select" className="text-[11px] font-bold text-[#1E331B] uppercase tracking-wider">
+                Year:
+              </label>
+              <div className="relative">
+                <select
+                  id="summary_year_select"
+                  value={selectedYear}
+                  onChange={(e) => setSelectedYear(Number(e.target.value))}
+                  className="appearance-none bg-white border border-[#2E6B3E] text-[#1E331B] font-bold text-xs px-2.5 py-1 pr-6 rounded-lg shadow-xs focus:outline-none focus:ring-1 focus:ring-[#2E6B3E] cursor-pointer"
+                >
+                  {availableYears.map((yr) => (
+                    <option key={yr} value={yr}>
+                      {yr}
+                    </option>
+                  ))}
+                </select>
+                <ChevronDown className="w-3 h-3 text-[#2E6B3E] absolute right-1.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+              </div>
             </div>
           </div>
         </div>
 
-        {/* 12 MONTHLY CARDS RESPONSIVE GRID */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3.5">
-          {monthlySummaryData.map((month) => {
-            const hasData = month.totalContractsCount > 0 || month.monthlyTotalPaid > 0 || month.pendingContractsCount > 0;
+        {/* COMPACT (1/4 SIZE) MONTHLY CARDS RESPONSIVE GRID */}
+        {(() => {
+          const visibleMonths = monthlySummaryData.filter((m) => showAllMonths || m.hasData);
 
+          if (visibleMonths.length === 0) {
             return (
-              <div
-                key={month.monthIndex}
-                className={cn(
-                  "bg-white border rounded-xl p-3.5 shadow-xs hover:shadow-md transition-all flex flex-col justify-between group",
-                  hasData 
-                    ? "border-[#D6CAA8] hover:border-[#2E6B3E]" 
-                    : "border-slate-200 opacity-80 hover:opacity-100"
-                )}
-              >
-                {/* Month Name Header */}
-                <div className="flex items-center justify-between pb-2 border-b border-[#F2EDE0]">
-                  <h3 className="text-xs font-extrabold text-[#1E331B] uppercase tracking-wider flex items-center gap-1.5">
-                    <span className="w-2 h-2 rounded-full bg-[#2E6B3E]" />
-                    {month.monthName} {selectedYear}
-                  </h3>
-                  {hasData ? (
-                    <span className="px-2 py-0.5 bg-emerald-50 text-emerald-800 text-[10px] font-bold rounded-md border border-emerald-200">
-                      {month.totalContractsCount} Saudas
-                    </span>
-                  ) : (
-                    <span className="text-[10px] text-slate-400 font-medium italic">No activity</span>
-                  )}
-                </div>
-
-                {/* 4 Key Metrics */}
-                <div className="py-2.5 space-y-2 text-xs">
-                  
-                  {/* 1. Total Contract Sauda */}
-                  <div 
-                    onClick={() => month.totalContractsCount > 0 && openDrillDown('monthly_sauda', `${month.monthName} ${selectedYear} - Total Contract Sauda`, month.matchingSaudas, month.monthName, selectedYear)}
-                    className={cn(
-                      "flex items-center justify-between p-1.5 rounded-lg transition-colors",
-                      month.totalContractsCount > 0 ? "hover:bg-emerald-50 cursor-pointer" : ""
-                    )}
-                    title="Click to view contract details"
-                  >
-                    <span className="text-[11px] text-[#556952] font-semibold flex items-center gap-1">
-                      <Package className="w-3.5 h-3.5 text-[#2E6B3E]" /> Total Contract Sauda:
-                    </span>
-                    <span className="font-extrabold text-[#1E331B] font-numeric">
-                      {month.totalContractsCount} <span className="text-[10px] text-[#556952]">({month.totalContractsWeightMT} MT)</span>
-                    </span>
-                  </div>
-
-                  {/* 2. Pending Sauda */}
-                  <div 
-                    onClick={() => month.pendingContractsCount > 0 && openDrillDown('monthly_pending', `${month.monthName} ${selectedYear} - Pending Sauda`, month.matchingPendingSaudas, month.monthName, selectedYear)}
-                    className={cn(
-                      "flex items-center justify-between p-1.5 rounded-lg transition-colors",
-                      month.pendingContractsCount > 0 ? "hover:bg-amber-50 cursor-pointer" : ""
-                    )}
-                    title="Click to view pending sauda"
-                  >
-                    <span className="text-[11px] text-amber-800 font-semibold flex items-center gap-1">
-                      <Clock className="w-3.5 h-3.5 text-amber-600" /> Pending Sauda:
-                    </span>
-                    <span className="font-extrabold text-amber-900 font-numeric">
-                      {month.pendingContractsCount} <span className="text-[10px] text-amber-700">({month.pendingContractsWeightMT} MT)</span>
-                    </span>
-                  </div>
-
-                  {/* 3. Total Payment */}
-                  <div 
-                    onClick={() => month.monthlyTotalPaid > 0 && openDrillDown('monthly_payment', `${month.monthName} ${selectedYear} - Payments Disbursed`, month.matchingPayments, month.monthName, selectedYear)}
-                    className={cn(
-                      "flex items-center justify-between p-1.5 rounded-lg transition-colors",
-                      month.monthlyTotalPaid > 0 ? "hover:bg-emerald-50 cursor-pointer" : ""
-                    )}
-                    title="Click to view payments"
-                  >
-                    <span className="text-[11px] text-emerald-800 font-semibold flex items-center gap-1">
-                      <Coins className="w-3.5 h-3.5 text-emerald-600" /> Total Payment:
-                    </span>
-                    <span className="font-extrabold text-emerald-900 font-numeric">
-                      {formatIndianCurrency(month.monthlyTotalPaid)}
-                    </span>
-                  </div>
-
-                  {/* 4. Rest Payment (Outstanding) */}
-                  <div 
-                    onClick={() => month.monthlyRestPayment > 0 && openDrillDown('monthly_rest', `${month.monthName} ${selectedYear} - Outstanding Rest Balance`, month.matchingPayments, month.monthName, selectedYear)}
-                    className={cn(
-                      "flex items-center justify-between p-1.5 rounded-lg transition-colors",
-                      month.monthlyRestPayment > 0 ? "hover:bg-rose-50 cursor-pointer" : ""
-                    )}
-                    title="Click to view outstanding rest balances"
-                  >
-                    <span className="text-[11px] text-rose-800 font-semibold flex items-center gap-1">
-                      <Scale className="w-3.5 h-3.5 text-rose-600" /> Rest Payment:
-                    </span>
-                    <span className="font-extrabold text-rose-900 font-numeric">
-                      {formatIndianCurrency(month.monthlyRestPayment)}
-                    </span>
-                  </div>
-
-                </div>
-
-                {/* Card Footer Action */}
-                <div 
-                  onClick={() => openDrillDown('monthly_sauda', `${month.monthName} ${selectedYear} Records`, month.matchingSaudas, month.monthName, selectedYear)}
-                  className="pt-2 border-t border-[#F2EDE0] text-[10px] font-bold text-[#2E6B3E] flex items-center justify-between cursor-pointer group-hover:text-[#1E331B]"
+              <div className="text-center py-6 px-4 bg-[#FAF7F0] border border-dashed border-[#D6CAA8] rounded-xl">
+                <p className="text-xs font-semibold text-[#556952]">No transaction or sauda activity recorded in {selectedYear}.</p>
+                <button
+                  onClick={() => setShowAllMonths(true)}
+                  className="mt-2 text-[11px] font-bold text-[#2E6B3E] hover:underline cursor-pointer"
                 >
-                  <span>Drill-down details</span>
-                  <ChevronRight className="w-3.5 h-3.5 transition-transform group-hover:translate-x-0.5" />
-                </div>
+                  Click here to show all 12 empty calendar months
+                </button>
               </div>
             );
-          })}
-        </div>
+          }
+
+          return (
+            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 xl:grid-cols-6 gap-2">
+              {visibleMonths.map((month) => {
+                const hasData = month.hasData;
+
+                return (
+                  <div
+                    key={month.monthIndex}
+                    onClick={() => openDrillDown('monthly_sauda', `${month.monthName} ${selectedYear} Activity`, month.matchingSaudas, month.monthName, selectedYear)}
+                    className={cn(
+                      "bg-white border rounded-lg p-2 shadow-2xs hover:shadow-md transition-all flex flex-col justify-between cursor-pointer group hover:-translate-y-0.5",
+                      hasData 
+                        ? "border-[#D6CAA8] hover:border-[#2E6B3E]" 
+                        : "border-slate-200 bg-slate-50/50 opacity-70 hover:opacity-100"
+                    )}
+                  >
+                    {/* Compact Month Header */}
+                    <div className="flex items-center justify-between pb-1.5 border-b border-[#F2EDE0]">
+                      <span className="text-[11px] font-extrabold text-[#1E331B] uppercase tracking-wide flex items-center gap-1">
+                        <span className={cn("w-1.5 h-1.5 rounded-full", hasData ? "bg-[#2E6B3E]" : "bg-slate-300")} />
+                        {month.monthName.slice(0, 3)} {String(selectedYear).slice(-2)}
+                      </span>
+                      {hasData ? (
+                        <span className="px-1.5 py-0.2 bg-emerald-50 text-emerald-800 text-[9px] font-bold rounded border border-emerald-200">
+                          {month.totalContractsCount} S
+                        </span>
+                      ) : (
+                        <span className="text-[9px] text-slate-400 italic">0</span>
+                      )}
+                    </div>
+
+                    {/* 4 Ultra-Compact Key Metrics */}
+                    <div className="py-1.5 space-y-1 text-[10px]">
+                      {/* Contract */}
+                      <div className="flex items-center justify-between">
+                        <span className="text-slate-500 font-medium">Sauda:</span>
+                        <span className="font-bold text-[#1E331B] font-numeric">
+                          {month.totalContractsCount} <span className="text-[9px] text-slate-400 font-normal">({month.totalContractsWeightMT}T)</span>
+                        </span>
+                      </div>
+
+                      {/* Pending */}
+                      <div className="flex items-center justify-between">
+                        <span className="text-amber-700 font-medium">Pending:</span>
+                        <span className="font-bold text-amber-900 font-numeric">
+                          {month.pendingContractsCount} <span className="text-[9px] text-amber-600 font-normal">({month.pendingContractsWeightMT}T)</span>
+                        </span>
+                      </div>
+
+                      {/* Paid */}
+                      <div className="flex items-center justify-between">
+                        <span className="text-emerald-700 font-medium">Paid:</span>
+                        <span className="font-bold text-emerald-900 font-numeric">
+                          {month.monthlyTotalPaid > 0 ? formatIndianCurrency(month.monthlyTotalPaid) : '₹0'}
+                        </span>
+                      </div>
+
+                      {/* Rest Due */}
+                      <div className="flex items-center justify-between">
+                        <span className="text-rose-700 font-medium">Due:</span>
+                        <span className="font-bold text-rose-900 font-numeric">
+                          {month.monthlyRestPayment > 0 ? formatIndianCurrency(month.monthlyRestPayment) : '₹0'}
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* Micro Footer */}
+                    <div className="pt-1 border-t border-[#F2EDE0] flex items-center justify-between text-[9px] font-bold text-[#2E6B3E] group-hover:text-[#1E331B]">
+                      <span>View</span>
+                      <ChevronRight className="w-2.5 h-2.5 transition-transform group-hover:translate-x-0.5" />
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          );
+        })()}
       </div>
 
       {/* 4. PROCESS MATRIX DATA TABLE */}
